@@ -1,0 +1,43 @@
+/** Petits utilitaires de rendu markdown (GitLab Flavored Markdown) partagés par les textes du domaine. */
+
+/**
+ * Code inline sûr : le délimiteur est une suite de backticks plus longue que la plus longue
+ * présente dans le texte, avec des espaces de garde si le texte commence ou finit par un backtick.
+ */
+export function codeSpan(text: string): string {
+  const value = oneLine(text);
+  const longestRun = Math.max(0, ...(value.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  const pad = value.startsWith("`") || value.endsWith("`") ? " " : "";
+  return `${fence}${pad}${value}${pad}${fence}`;
+}
+
+/** Ramène un texte sur une seule ligne (les retours à la ligne casseraient un élément de liste ou de tableau). */
+export function oneLine(text: string): string {
+  return text.replace(/\s*\r?\n\s*/g, " ").trim();
+}
+
+/**
+ * Élément de liste dont le texte peut tenir sur plusieurs lignes : les lignes suivantes sont indentées
+ * sous le contenu de l'élément pour rester dans la liste.
+ */
+export function listItem(marker: string, text: string): string {
+  const indent = " ".repeat(marker.length + 1);
+  const lines = text.trim().split(/\r?\n/);
+  return lines.map((line, i) => (i === 0 ? `${marker} ${line}` : line.trim() === "" ? "" : `${indent}${line}`)).join("\n");
+}
+
+/** Mentions `@user` dédupliquées (insensible à la casse et au `@` initial), dans l'ordre d'apparition. */
+export function mentionList(mentions: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of mentions) {
+    const username = raw.trim().replace(/^@+/, "");
+    if (username === "") continue;
+    const key = username.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(`@${username}`);
+  }
+  return out;
+}

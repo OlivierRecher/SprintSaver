@@ -1,0 +1,43 @@
+{
+  "name": "sprintsaver",
+  "version": "0.1.0",
+  "description": "Prend en charge les tickets GitLab étiquetés auto::ready et livre une MR prête à relire, via le Claude Agent SDK.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "sprintsaver": "dist/cli/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx src/cli/index.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e:local": "tsx scripts/e2e-local.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.330",
+    "@inquirer/prompts": "^8.8.1",
+    "commander": "^15.1.0",
+    "execa": "^10.2.1",
+    "pino": "^10.4.0",
+    "pino-pretty": "^13.2.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "docs",
+    "README.md"
+  ]
+}
