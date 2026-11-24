@@ -29,7 +29,7 @@ Tu reçois la liste des cases avec leur index. Rends une entrée par case, au m�
 - **Testable** : un test automatisé lancé par la commande de test du dépôt peut vérifier le critère par une assertion. Juge avec l'infrastructure qui existe. Un comportement d'interface est testable si le dépôt a des tests de composants ou e2e capables de l'observer, ou si la logique sous-jacente se teste à un niveau inférieur sans trahir le critère.
 - **Non testable** : validation PO ou métier, déploiement, configuration d'un environnement, documentation externe ou wiki, communication à l'équipe, critère subjectif (« plus clair », « rapide » sans seuil), action manuelle hors du dépôt. Une case que son auteur a suffixée « (vérification manuelle) » est non testable : respecte ce choix.
 
-Pour une case testable, `reason` dit concrètement comment elle sera testée : niveau, entrée, assertion attendue. La phase d'écriture des tests suivra cette consigne. Pour une case non testable, écris une ligne qui apparaîtra telle quelle dans la MR.
+Pour une case testable, `reason` dit concrètement comment elle sera testée : niveau, entrée, assertion attendue. La phase d'écriture des tests suivra cette consigne. Pour une case non testable, écris la raison en quelques mots (« validation PO », « déploiement ») : elle apparaît telle quelle dans la MR, à côté du critère. Ne répète pas le critère.
 
 Les deux erreurs coûtent. Une case classée non testable par confort reste décochée sur le ticket. Une case classée testable alors qu'on ne peut la prouver que par un test creux sera rejetée par la vérification indépendante, après plusieurs itérations perdues.
 
@@ -45,8 +45,8 @@ Une question bloquante met le ticket en attente d'un humain. C'est coûteux, mai
 ## 5. Remplir la sortie
 
 - `type` : `bug` si le ticket décrit un écart entre le comportement actuel et un comportement attendu qui existait ou allait de soi, `feature` s'il demande quelque chose de nouveau. L'orchestrateur ne s'en sert que si les labels n'ont pas tranché.
-- `summary` : 2 à 4 phrases sur le besoin réel et ce qui change pour l'utilisateur. Pas une paraphrase du titre.
+- `summary` : 2 ou 3 phrases courtes sur le besoin réel et ce qui change pour l'utilisateur. Publié sur le ticket : pas de valeurs internes (poids, constantes), pas de récit de ce que tu as vérifié, pas une paraphrase du titre.
 - `plan` : 3 à 7 étapes courtes et concrètes (modules ou fichiers visés, tests à écrire). Il est publié sur le ticket : un humain doit comprendre en dix secondes ce qui va être fait.
 - `precedents` : chaque ticket, MR ou commit examiné, retenu ou non, avec la raison.
-- `assumptions` : les hypothèses de l'étape 4.
+- `assumptions` : les hypothèses de l'étape 4, une ligne chacune (une phrase, sans justification développée).
 - `blockingQuestions` : vide si rien ne bloque. N'y mets jamais une question dont la réponse est dans le ticket, ses commentaires ou le code.

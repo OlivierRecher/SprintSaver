@@ -640,6 +640,10 @@ export class GitLabApiImpl implements GitLabApi {
     return p ? toPipeline(p) : null;
   }
 
+  async pipelineFailedJobs(projectId: number, pipelineId: number): Promise<Job[]> {
+    return this.failedJobsOf(projectId, pipelineId);
+  }
+
   /** `projectId` : celui du job (`job.projectId ?? project.id` pour un job de pipeline aval). */
   async jobLog(projectId: number, jobId: number, maxChars = DEFAULT_JOB_LOG_CHARS): Promise<string> {
     const trace = await this.rest.text(`/projects/${pid(projectId)}/jobs/${jobId}/trace`);

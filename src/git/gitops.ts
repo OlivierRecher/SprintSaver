@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { execa } from "execa";
 import type { ProjectConfig } from "../config/schema.js";
 import { paths } from "../config/paths.js";
-import type { CommandResult, GitOps, RebaseResult } from "../contracts.js";
+import { ProjectCommandError, type CommandResult, type GitOps, type RebaseResult } from "../contracts.js";
 import { log } from "../log.js";
 import { killProcessGroup, trackProcessGroup } from "../process-groups.js";
 import { projectCommandEnv } from "../process-env.js";
@@ -321,7 +321,7 @@ export function createGitOps(opts: GitOpsOptions): GitOps {
       const res = await run(wtPath, project.setupCommand, timeoutMs);
       if (res.exitCode !== 0 || res.timedOut) {
         const why = res.timedOut ? `timeout après ${timeoutMs} ms` : `code ${res.exitCode}`;
-        throw new Error(`setupCommand « ${project.setupCommand} » a échoué (${why}) :\n${tail(res.output, 4_000)}`);
+        throw new ProjectCommandError("setup du projet", project.setupCommand, why, tail(res.output, 20_000));
       }
     }
   }

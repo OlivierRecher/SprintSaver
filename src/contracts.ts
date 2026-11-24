@@ -174,6 +174,8 @@ export interface GitLabApi {
   }): Promise<PipelineOutcome>;
   /** Dernier pipeline terminé de la branche donnée (ou null). */
   latestFinishedPipeline(projectId: number, ref: string): Promise<Pipeline | null>;
+  /** Jobs en échec (hors allow_failure) d'un pipeline terminé, pipelines aval compris, nommés comme dans `PipelineOutcome`. */
+  pipelineFailedJobs(projectId: number, pipelineId: number): Promise<Job[]>;
   /** Fin du log d'un job (tronqué à maxChars depuis la fin). */
   jobLog(projectId: number, jobId: number, maxChars?: number): Promise<string>;
 
@@ -302,6 +304,21 @@ export class AgentRunError extends Error {
   }
 }
 
+/** Commande du projet (setup…) en échec : la sortie brute est gardée pour en tirer un extrait utile. */
+export class ProjectCommandError extends Error {
+  constructor(
+    /** Étape, telle qu'affichée : « setup du projet ». */
+    readonly step: string,
+    readonly command: string,
+    /** « code 1 » ou « timeout après … ». */
+    readonly why: string,
+    readonly output: string,
+  ) {
+    super(`${step} en échec (${why})`);
+    this.name = "ProjectCommandError";
+  }
+}
+
 export interface AgentRunner {
   run<T>(req: AgentRunRequest<T>): Promise<AgentRunResult<T>>;
 }
@@ -409,6 +426,10 @@ export interface TicketState {
   ciGreenSha?: string;
   /** Pipeline de `ciGreenSha` resté en attente faute de runner : CI non exécutée (signalé dans la MR). */
   ciNoRunnerPipelineUrl?: string;
+  /** Bloqué par la boucle CI : `run --accept-ci` peut livrer quand même. */
+  blockedByCi?: boolean;
+  /** CI rouge acceptée par l'utilisateur pour `ciGreenSha` (`run --accept-ci`, signalé dans la MR). */
+  ciAccepted?: boolean;
   /** Temps de traitement actif cumulé (ms), hors périodes où l'outil était arrêté. Absent : 0. */
   activeMs?: number;
   /** Le worktree doit être recréé depuis le remote à la prochaine préparation (nouveau passage). */

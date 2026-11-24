@@ -18,14 +18,13 @@ Tu reçois le ticket, l'analyse, le diff et les sorties des phases. Ne modifie r
 
 ## Résumé
 
-3 à 6 lignes, dans la langue du ticket, pour un développeur de l'équipe qui va relire :
+Une liste de 2 à 4 puces, dans la langue du ticket. Le relecteur doit comprendre la MR en dix secondes : chaque puce tient sur une ligne (25 mots au plus).
 
-- **Quoi** : le changement de comportement, en termes concrets.
-- **Pourquoi** : le besoin ou le problème en une phrase. Pour un bug, la cause racine.
-- **Comment**, si ce n'est pas évident : l'approche retenue et les fichiers où se trouve l'essentiel.
-- **Points d'attention** : ce qui mérite un regard humain, par exemple un choix discutable, une migration, une API ou un comportement modifié pour d'autres appelants, une dépendance ajoutée, une zone fragile. S'il n'y en a pas, n'en invente pas.
+- Le changement de comportement, en termes concrets. Pour un bug, la cause racine en quelques mots.
+- L'approche, seulement si elle n'est pas évidente, avec le fichier où se trouve l'essentiel.
+- `**À vérifier** :` ce qui mérite un regard humain (choix discutable, migration, contrat modifié pour d'autres appelants, dépendance ajoutée, zone fragile). Omets la puce s'il n'y a rien : n'en invente pas.
 
-Reste factuel. Pas d'auto-évaluation (« robuste », « complet », « propre »), pas de récit des phases ou des itérations, pas de mention de l'outil. Le markdown léger (liste, `code`) est bienvenu, les titres de section non : le résumé est inséré dans une description qui a déjà les siens.
+Reste factuel et sobre, comme un collègue qui écrit sa MR. Pas d'auto-évaluation (« robuste », « complet »), pas de récit des phases, pas de mention de l'outil, pas de redite de l'avant / après ni des critères. Pas de titre de section : le résumé est inséré sous « Closes #… ».
 
 ## Avant / après
 
@@ -43,7 +42,7 @@ Pour `endpoint` et `data`, une entrée de `dataChanges` par contrat touché :
 - `before` / `after` : **le même exemple** représenté avant puis après, au format naturel du contrat (JSON pour un payload, DDL ou liste de colonnes pour une table, en-tête et une ligne pour un CSV). Garde la même forme, le même ordre des champs et la même indentation des deux côtés : l'orchestrateur en tire un diff ligne à ligne, et seules les lignes qui changent doivent apparaître en rouge et vert. Pour une requête et sa réponse, mets les deux dans le même exemple (`// requête`, `// réponse`).
 - Tire les exemples du code et des tests (fixtures, assertions) : vrais noms de champs, de routes, de colonnes, valeurs plausibles. N'invente pas de champ que le code ne produit pas. Coupe ce qui ne change pas et n'aide pas à comprendre (`…`).
 - `change` : `added` (laisse `before` vide), `removed` (laisse `after` vide), sinon `modified`.
-- `note` : une ligne si le relecteur doit savoir quelque chose (rétrocompatibilité, valeur par défaut, migration de données existantes, appelants à prévenir). Vide sinon.
+- `note` : une phrase courte si le relecteur doit savoir quelque chose (rétrocompatibilité, valeur par défaut, migration de données existantes, appelants à prévenir). Vide sinon.
 
 ## Remplir la sortie
 

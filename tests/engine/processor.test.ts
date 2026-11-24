@@ -2,10 +2,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentRunError, type TicketState } from "../../src/contracts.js";
+import { AgentRunError, ProjectCommandError, type TicketState } from "../../src/contracts.js";
 import type { Config, ProjectConfig } from "../../src/config/schema.js";
 import { paths } from "../../src/config/paths.js";
-import { createTicketProcessor, mrTitle } from "../../src/engine/processor.js";
+import { createTicketProcessor, InvalidRunOption, mrTitle } from "../../src/engine/processor.js";
 import {
   CallLog,
   FakeAgent,
@@ -45,7 +45,7 @@ interface Harness {
   config: Config;
   project: ProjectConfig;
   clock: { now: Date };
-  run: (opts?: { manual?: boolean }) => Promise<TicketState>;
+  run: (opts?: { manual?: boolean; acceptCi?: boolean }) => Promise<TicketState>;
 }
 
 function harness(opts: { config?: Partial<Config>; project?: Partial<ProjectConfig> } = {}): Harness {
@@ -369,21 +369,95 @@ describe("CI", () => {
     expect(state.phase).toBe("finalized");
     expect(state.flakyJobs).toEqual(["e2e"]);
     expect(h.agent.phases()).not.toContain("ci-fix");
-    expect(h.log.count("gitlab.latestFinishedPipeline")).toBe(0);
+    // Base verte consultée avant la relance, une seule fois.
+    expect(h.log.count("gitlab.latestFinishedPipeline")).toBe(1);
+    before(h, "gitlab.latestFinishedPipeline", "gitlab.retryJobsAndWait");
   });
 
-  it("CI de la base cassée : blocage spécial, sans ci-fix", async () => {
+  it("CI de la base cassée sur d'autres jobs : relance, puis blocage spécial, sans ci-fix", async () => {
     const h = harness();
     h.gitlab.pipelineOutcomes = [ciFailed()];
     h.gitlab.retryOutcomes = [ciFailed()];
     h.gitlab.base = basePipeline("failed");
+    h.gitlab.baseFailedJobs = [job("deploy", 900)];
     const state = await h.run();
     expect(state.phase).toBe("blocked");
     expect(state.phaseBeforeBlock).toBe("pushed");
     expect(state.blockedReason).toMatch(/CI de main cassée/);
+    expect(h.log.count("gitlab.retryJobsAndWait")).toBe(1);
     expect(h.agent.phases()).not.toContain("ci-fix");
-    expect(h.gitlab.comments.at(-1)).toContain("https://gitlab.example.com/p/99");
+    const comment = h.gitlab.comments.at(-1)!;
+    expect(comment).toContain("https://gitlab.example.com/p/99");
+    expect(comment).not.toContain("n'ont pas été relancés");
+    expect(comment).toContain("Log du job unit (extrait)");
+    expect(comment).toContain("Error: expected 2 got 3");
     expect(h.gitlab.mrUpdates.length).toBeGreaterThan(0); // description de MR mise à jour
+  });
+
+  it("jobs en échec aussi sur la base : blocage immédiat, sans relance, avec l'extrait des logs", async () => {
+    const h = harness();
+    h.gitlab.pipelineOutcomes = [ciFailed([job("db", 41), job("app", 42)])];
+    h.gitlab.base = basePipeline("failed");
+    h.gitlab.baseFailedJobs = [job("db", 900), job("edge-functions", 901)];
+    h.gitlab.jobLogs.set(41, "$ psql -f schema.sql\nERROR: relation \"events\" does not exist\nJob failed: exit code 1");
+    const state = await h.run();
+    expect(state.phase).toBe("blocked");
+    expect(state.blockedReason).toMatch(/CI de main cassée/);
+    expect(h.log.count("gitlab.retryJobsAndWait")).toBe(0);
+    expect(h.log.count("gitlab.pipelineFailedJobs:99")).toBe(1);
+    expect(state.ciRetriedShas ?? []).toEqual([]);
+    expect(h.agent.phases()).not.toContain("ci-fix");
+    const comment = h.gitlab.comments.at(-1)!;
+    expect(comment).toContain("En échec ici comme sur `main` : `db` (non relancés).");
+    expect(comment).toContain("`sprintsaver run demo#12 --accept-ci`");
+    expect(comment).toContain('ERROR: relation "events" does not exist');
+    expect(comment).toContain("https://gitlab.example.com/j/42"); // les autres jobs en échec du ticket aussi
+  });
+
+  it("jobs de la base illisibles : relance comme avant", async () => {
+    const h = harness({ config: { retro: { enabled: false } } });
+    h.gitlab.pipelineOutcomes = [ciFailed([job("e2e")])];
+    h.gitlab.retryOutcomes = [ciSuccess()];
+    h.gitlab.base = basePipeline("failed");
+    h.gitlab.pipelineFailedJobs = async () => {
+      throw new Error("HTTP 500");
+    };
+    const state = await h.run();
+    expect(state.phase).toBe("finalized");
+    expect(state.flakyJobs).toEqual(["e2e"]);
+  });
+
+  it("résumé de phase CI : extrait du log de chaque job en échec, log lu une seule fois par job", async () => {
+    const h = harness();
+    h.gitlab.pipelineOutcomes = [ciFailed([job("unit", 31)]), ciSuccess()];
+    h.gitlab.retryOutcomes = [ciFailed([job("unit", 32)])];
+    h.gitlab.jobLogs.set(32, "npm warn deprecated foo@1\n$ npm test\nFAIL src/cart.test.ts\nTests: 1 failed, 9 passed");
+    await h.run();
+    const ci = h.recorder.summaries.filter((s) => s.phase === "ci");
+    const retryFacts = ci[1]!.facts.join("\n");
+    expect(retryFacts).toContain("log de unit : ");
+    expect(retryFacts).toContain("FAIL src/cart.test.ts | Tests: 1 failed, 9 passed");
+    expect(retryFacts).not.toContain("npm warn deprecated");
+    expect(ci[0]!.facts.join("\n")).toContain("Error: expected 2 got 3");
+    // Résumé puis ci-fix : le log du job 32 n'est lu qu'une fois.
+    expect(h.gitlab.jobLogCalls).toEqual([
+      { projectId: 7, jobId: 31 },
+      { projectId: 7, jobId: 32 },
+    ]);
+    expect(h.agent.requests.find((r) => r.phase === "ci-fix")!.prompt).toContain("FAIL src/cart.test.ts");
+  });
+
+  it("plafond d'itérations CI : commentaire de blocage avec l'extrait des logs", async () => {
+    const h = harness({ config: { retro: { enabled: false }, limits: { ...makeConfig().limits, ci: 1 } } });
+    h.gitlab.pipelineOutcomes = [ciFailed([job("unit", 31)]), ciFailed([job("unit", 33)])];
+    h.gitlab.retryOutcomes = [ciFailed([job("unit", 32)]), ciFailed([job("unit", 34)])];
+    const state = await h.run();
+    expect(state.phase).toBe("blocked");
+    expect(state.blockedReason).toMatch(/plafond d'itérations CI/);
+    expect(h.agent.phases().filter((p) => p === "ci-fix")).toHaveLength(1);
+    const comment = h.gitlab.comments.at(-1)!;
+    expect(comment).toContain("Log du job unit (extrait)");
+    expect(comment).toContain("log du job 34");
   });
 
   it("ci-fix puis vert : commit, tests, re-review du delta, push", async () => {
@@ -496,6 +570,91 @@ describe("erreurs", () => {
     expect(state.phase).toBe("blocked");
     expect(state.blockedReason).toBe("erreur technique : setup KO");
     expect(h.gitlab.comments.at(-1)).toContain("setup KO");
+  });
+});
+
+describe("setup du projet en échec", () => {
+  it("commentaire court : cause, commande, extrait utile de la sortie sans le bruit npm", async () => {
+    const h = harness({ config: { retro: { enabled: false } } });
+    const output = [
+      ...Array.from({ length: 30 }, (_, i) => `npm warn deprecated pkg${i}@1.0.0: obsolète`),
+      "added 1082 packages in 54s",
+      "ERROR: No matching distribution found for ortools==9.15",
+    ].join("\n");
+    h.git.prepareWorktree = async () => {
+      throw new ProjectCommandError("setup du projet", "npm ci && pip install -r req.txt", "code 1", output);
+    };
+    const state = await h.run();
+    expect(state.phase).toBe("blocked");
+    const comment = h.gitlab.comments.at(-1)!;
+    expect(comment).toContain("**Bloqué** : setup du projet en échec (code 1)\n\n- Commande : `npm ci && pip install -r req.txt`");
+    expect(comment).toContain("ERROR: No matching distribution found for ortools==9.15\n```");
+    expect(comment).not.toContain("npm warn deprecated");
+    expect(comment).not.toContain("--accept-ci");
+    // Le terminal (`run`, `status`) et la rétro voient aussi l'extrait.
+    expect(state.blockedReason).toMatch(/^setup du projet en échec \(code 1\)\n[\s\S]*ortools/);
+    expect(state.blockedByCi).toBeUndefined();
+  });
+});
+
+describe("run --accept-ci", () => {
+  async function blockedOnBaseCi(h: Harness): Promise<TicketState> {
+    h.gitlab.pipelineOutcomes = [ciFailed([job("db", 41)])];
+    h.gitlab.base = basePipeline("failed");
+    h.gitlab.baseFailedJobs = [job("db", 900)];
+    const blocked = await h.run();
+    expect(blocked.phase).toBe("blocked");
+    expect(blocked.blockedByCi).toBe(true);
+    return blocked;
+  }
+
+  it("livre un ticket bloqué par la CI sans refaire l'analyse ni attendre de pipeline, et la MR le signale", async () => {
+    const h = harness();
+    await blockedOnBaseCi(h);
+    const phasesBefore = h.agent.phases().length;
+    const waitsBefore = h.log.count("gitlab.waitForPipeline");
+    const state = await h.run({ manual: true, acceptCi: true });
+    expect(state.phase).toBe("finalized");
+    expect(state.ciAccepted).toBe(true);
+    expect(state.blockedByCi).toBeUndefined();
+    expect(h.agent.phases().slice(phasesBefore)).toEqual(["mr-writeup", "retro"]);
+    expect(h.log.count("gitlab.waitForPipeline")).toBe(waitsBefore);
+    const description = h.gitlab.mrUpdates.map((u) => u.patch.description).filter(Boolean).at(-1)!;
+    expect(description).toContain("**CI rouge acceptée manuellement**");
+    expect(h.gitlab.comments.at(-1)).toContain("**MR prête à relire**");
+  });
+
+  it("recrée le worktree supprimé depuis le blocage", async () => {
+    const h = harness({ config: { retro: { enabled: false } } });
+    const blocked = await blockedOnBaseCi(h);
+    rmSync(blocked.worktreePath, { recursive: true, force: true });
+    const prepares = h.log.count("git.prepareWorktree");
+    const state = await h.run({ manual: true, acceptCi: true });
+    expect(state.phase).toBe("finalized");
+    expect(h.log.count("git.prepareWorktree")).toBe(prepares + 1);
+  });
+
+  it("refusé pour un ticket jamais traité ou bloqué hors CI", async () => {
+    const fresh = harness();
+    await expect(fresh.run({ manual: true, acceptCi: true })).rejects.toThrow(InvalidRunOption);
+    expect(fresh.log.count("gitlab.removeLabel")).toBe(0);
+
+    const h = harness({ config: { retro: { enabled: false } } });
+    h.git.prepareWorktree = async () => {
+      throw new Error("setup KO");
+    };
+    expect((await h.run()).phase).toBe("blocked");
+    await expect(h.run({ manual: true, acceptCi: true })).rejects.toThrow(/--accept-ci ne s'applique qu'à un ticket arrêté ou bloqué pendant la CI/);
+  });
+
+  it("une reprise normale d'un ticket bloqué par la CI repart de l'analyse, sans acceptation", async () => {
+    const h = harness({ config: { retro: { enabled: false } } });
+    await blockedOnBaseCi(h);
+    h.gitlab.base = basePipeline("success");
+    const state = await h.run({ manual: true });
+    expect(state.phase).toBe("finalized");
+    expect(state.ciAccepted).toBeUndefined();
+    expect(h.agent.phases().filter((p) => p === "analyse")).toHaveLength(2);
   });
 });
 
@@ -612,7 +771,7 @@ describe("CI et reprise (push avant attente, pipeline introuvable)", () => {
     expect(h.log.count("gitlab.latestFinishedPipeline")).toBe(0);
     expect(h.agent.phases()).not.toContain("ci-fix");
     const description = h.gitlab.mrUpdates.map((u) => u.patch.description).filter(Boolean).at(-1)!;
-    expect(description).toContain("## CI non exécutée");
+    expect(description).toContain("**CI non exécutée**");
     expect(description).toContain("https://gitlab.example.com/p/7");
   });
 
@@ -921,6 +1080,7 @@ describe("intégration GitLab : images en échec, jobs de pipelines enfants, coc
     h.gitlab.retryOutcomes = [ciFailed([{ ...job("child-unit", 78), projectId: 999 }, job("unit", 79)])];
     await h.run();
     expect(h.gitlab.jobLogCalls).toEqual([
+      { projectId: 999, jobId: 77 },
       { projectId: 999, jobId: 78 },
       { projectId: 7, jobId: 79 },
     ]);
@@ -1104,7 +1264,7 @@ describe("reprises robustes : review due, rebase interrompu, livraison idempoten
     }
     expect(h.log.count("gitlab.setStatus:inReview")).toBe(1);
     expect(h.gitlab.comments).toHaveLength(1);
-    expect(h.gitlab.comments[0]).toContain("Résumé déjà rédigé");
+    expect(h.gitlab.comments[0]).toContain("**MR prête à relire** : https://mr/5");
     expect(state.deliverySteps).toMatchObject({ mrReady: true, boxesChecked: true, statusSet: true, commented: true, worktreeRemoved: true });
   });
 
@@ -1165,6 +1325,28 @@ describe("avant / après dans la MR (ADR, amendement 3)", () => {
     expect(finalDescription(h)).toContain('### `GET /api/cart` (API, modifié)\n\n```diff\n {\n-  "total": 12.3\n+  "total": 12.30\n }\n```');
   });
 
+  it("recette de lancement rendue par les captures : patch proposé sur le skill projet, sans effet sur la MR", async () => {
+    const h = harness({ config: { retro: { enabled: false } } });
+    h.agent.on("mr-writeup", () => uiWriteup);
+    h.agent.on(
+      "ui-captures",
+      writesCaptures(
+        { ".sprintsaver/captures/1-apres.png": "png-b" },
+        {
+          captures: [{ label: "Panier", before: "", after: ".sprintsaver/captures/1-apres.png", note: "" }],
+          skippedReason: "",
+          launchRecipe: "- `npm run web -- --port 4801`, compte de démo `demo@shop.test`.",
+        },
+      ),
+    );
+    const st = await h.run();
+    expect(st.phase).toBe("finalized");
+    const patch = readFileSync(join(paths.run(KEY), "launch-recipe.patch"), "utf8");
+    expect(patch).toContain("+++ b/skills/projects/demo.md");
+    expect(patch).toContain("+- `npm run web -- --port 4801`, compte de démo `demo@shop.test`.");
+    expect(finalDescription(h)).not.toContain("demo@shop.test");
+  });
+
   it("changement d'interface : worktree « avant » préparé, captures téléversées puis rendues, worktree supprimé", async () => {
     const h = harness({ config: { retro: { enabled: false } } });
     h.agent.on("mr-writeup", () => uiWriteup);
@@ -1175,6 +1357,7 @@ describe("avant / après dans la MR (ADR, amendement 3)", () => {
         {
           captures: [{ label: "Panier", before: ".sprintsaver/captures/1-avant.png", after: ".sprintsaver/captures/1-apres.png", note: "Total sous la liste." }],
           skippedReason: "",
+          launchRecipe: "",
         },
       ),
     );
@@ -1242,6 +1425,7 @@ describe("avant / après dans la MR (ADR, amendement 3)", () => {
         {
           captures: [{ label: "Panier", before: "src/secret.png", after: ".sprintsaver/captures/1-apres.png", note: "" }],
           skippedReason: "écran Paiement : authentification requise",
+          launchRecipe: "",
         },
       ),
     );
@@ -1257,7 +1441,7 @@ describe("avant / après dans la MR (ADR, amendement 3)", () => {
     h.agent.on("mr-writeup", () => uiWriteup);
     h.agent.on("ui-captures", () => {
       h.git.dirty = true;
-      return { captures: [], skippedReason: "rien" };
+      return { captures: [], skippedReason: "rien", launchRecipe: "" };
     });
     await h.run();
     before(h, "agent.ui-captures", "git.discardChanges");

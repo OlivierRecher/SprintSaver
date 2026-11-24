@@ -67,7 +67,16 @@ Tu es une phase d'un pipeline automatisé (SprintSaver) qui traite un ticket Git
 - Ne commite pas : l'orchestrateur commite lui-même à la fin de la phase. Laisse tes modifications dans l'arbre de travail.
 - GitLab n'est accessible qu'en lecture, via les outils MCP \`${GITLAB_MCP_SERVER_NAME}\` (search_issues, get_issue, get_issue_closing_mrs, get_mr_diff). N'utilise ni glab ni l'API HTTP.
 - Un garde-fou refuse les commandes interdites : si un appel est refusé, lis la raison et adapte-toi, ne cherche pas à le contourner.
+- Le shell des commandes est souvent zsh : un motif glob sans correspondance y fait échouer toute la commande (« no matches found »). Mets entre guillemets les motifs destinés à la commande elle-même (\`grep -r --include='*.ts'\`, \`find . -name '*.test.ts'\`) et vérifie l'existence d'un fichier avant d'utiliser un glob dessus.
 - Termine en produisant la sortie structurée demandée, conforme au schéma JSON fourni. L'orchestrateur ne lit que cette sortie.`;
+
+/**
+ * Outils intégrés offerts aux sessions de ticket, et seulement eux. Le preset de Claude Code en ajoute une
+ * cinquantaine (Workflow, RemoteTrigger, CronCreate, PushNotification, WebSearch…) que le garde-fou ne contrôle
+ * pas et qui alourdissent chaque prompt système. Les outils MCP (GitLab, navigateur) et la sortie structurée
+ * s'ajoutent à cette liste. ToolSearch charge les outils MCP différés (navigateur).
+ */
+export const SESSION_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "ToolSearch"];
 
 /**
  * Environnement de la session : celui des commandes du projet (sans les traces du gestionnaire de paquets qui a
@@ -279,6 +288,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       model,
       effort: effortFor(req.phase),
       settingSources: [],
+      tools: SESSION_TOOLS,
       strictMcpConfig: true,
       systemPrompt: { type: "preset", preset: "claude_code", append },
       permissionMode: "bypassPermissions",

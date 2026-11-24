@@ -210,6 +210,8 @@ describe("createAgentRunner", () => {
     expect(opts.model).toBe(OPUS);
     expect(opts.effort).toBe("high");
     expect(opts.settingSources).toEqual([]);
+    // Liste blanche : ni Workflow, ni RemoteTrigger, ni WebSearch…
+    expect(opts.tools).toEqual(["Bash", "Read", "Edit", "Write", "Glob", "Grep", "ToolSearch"]);
     expect(opts.permissionMode).toBe("bypassPermissions");
     expect(opts.allowDangerouslySkipPermissions).toBe(true);
     expect(opts.maxTurns).toBe(150);
@@ -221,6 +223,9 @@ describe("createAgentRunner", () => {
     expect(sp.type).toBe("preset");
     expect(sp.preset).toBe("claude_code");
     expect(sp.append).toContain("pipeline automatisé");
+    // Shell zsh : un glob sans correspondance fait échouer la commande, les motifs vont entre guillemets.
+    expect(sp.append).toContain("no matches found");
+    expect(sp.append).toContain("--include='*.ts'");
     expect(sp.append).toContain("Skill implement.");
     expect(sp.append).toContain("Ticket #12 : ajouter un bouton.");
     expect(sp.append.indexOf("Skill implement.") < sp.append.indexOf("Ticket #12")).toBe(true);

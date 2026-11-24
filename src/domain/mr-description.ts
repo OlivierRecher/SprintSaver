@@ -1,7 +1,7 @@
 /** Description de MR (format ADR § 7). */
 import type { Criterion, CriterionProof, Finding, TestEntry } from "../contracts.js";
 import { lineDiff } from "./line-diff.js";
-import { codeSpan, oneLine } from "./markdown.js";
+import { clip, codeSpan, escapeHtml, fenceFor, oneLine } from "./markdown.js";
 
 /** Changement de contrat de données ou d'API, montré en diff avant/après. */
 export interface DataChange {
@@ -35,6 +35,8 @@ export interface MrDescriptionInput {
   flakyJobs: string[];
   /** Pipeline resté en attente faute de runner : la CI n'a pas tourné sur le code livré. */
   ciNoRunnerPipelineUrl?: string;
+  /** CI rouge acceptée manuellement (`run --accept-ci`). */
+  ciAccepted?: boolean;
   /** Captures avant/après des écrans modifiés (changement d'interface). */
   captures?: ScreenCapture[];
   /** Changement d'interface sans captures complètes : pourquoi (une ligne). */
@@ -47,46 +49,37 @@ export interface MrDescriptionInput {
 
 export const IN_PROGRESS_BANNER = "> 🚧 Travail en cours — SprintSaver itère encore sur cette MR.";
 
+/** Longueurs visibles : la description se relit d'un coup d'œil, le détail reste dans le ticket et le diff. */
+const CRITERION_CHARS = 140;
+const REASON_CHARS = 160;
+const NOTE_CHARS = 200;
+
 export function renderMrDescription(input: MrDescriptionInput): string {
   const blocks: string[] = [];
 
   if (input.inProgress) blocks.push(IN_PROGRESS_BANNER);
   blocks.push(`Closes #${input.iid}`);
-  blocks.push(section("Résumé", [input.summary.trim() || "_Pas de résumé._"]));
+  blocks.push(input.summary.trim() || "_Pas de résumé._");
+
+  const warnings = renderWarnings(input);
+  if (warnings.length > 0) blocks.push(section("À vérifier", warnings));
 
   const captures = input.captures ?? [];
   const missing = oneLine(input.capturesMissing ?? "");
   if (captures.length > 0 || missing !== "") {
     const lines = captures.flatMap(renderCapture);
-    if (missing !== "") lines.push("", `> Captures ${captures.length > 0 ? "incomplètes" : "non réalisées"} : ${missing}`);
-    blocks.push(section("Captures avant / après", lines));
+    if (missing !== "") lines.push("", `> Captures ${captures.length > 0 ? "incomplètes" : "non réalisées"} : ${clip(missing, NOTE_CHARS)}`);
+    blocks.push(section("Captures", lines));
   }
 
   const dataChanges = input.dataChanges ?? [];
-  if (dataChanges.length > 0) blocks.push(section("Changements de données et d'API", dataChanges.flatMap(renderDataChange)));
-  blocks.push(section("Critères", renderCriteria(input.criteria, input.proofs)));
-  blocks.push(
-    section("Tests ajoutés / modifiés", input.tests.length > 0 ? input.tests.map(renderTest) : ["Aucun test ajouté ou modifié."]),
-  );
+  if (dataChanges.length > 0) blocks.push(section("Changements d'API et de données", dataChanges.flatMap(renderDataChange)));
+  blocks.push(renderCriteria(input.criteria, input.proofs));
+  blocks.push(section("Tests", renderTests(input.tests)));
 
   const assumptions = input.assumptions.map(oneLine).filter((a) => a !== "");
-  if (assumptions.length > 0) blocks.push(section("Hypothèses", assumptions.map((a) => `- ${a}`)));
-
-  if (input.nits.length > 0) blocks.push(section("Nits restants", input.nits.map(renderNit)));
-
-  const flaky = [...new Set(input.flakyJobs.map(oneLine).filter((j) => j !== ""))];
-  if (flaky.length > 0) {
-    blocks.push(section("Jobs CI instables", flaky.map((job) => `- ${codeSpan(job)} : passé à la 2ᵉ tentative`)));
-  }
-
-  const noRunner = oneLine(input.ciNoRunnerPipelineUrl ?? "");
-  if (noRunner !== "") {
-    blocks.push(
-      section("CI non exécutée", [
-        `Aucun runner n'était disponible : le [pipeline](${noRunner}) est resté en attente et la CI n'a pas validé ce code.`,
-      ]),
-    );
-  }
+  if (assumptions.length > 0) blocks.push(collapsible(`Hypothèses (${assumptions.length})`, assumptions.map((a) => `- ${a}`)));
+  if (input.nits.length > 0) blocks.push(collapsible(`Nits restants (${input.nits.length})`, input.nits.map(renderNit)));
 
   return blocks.join("\n\n") + "\n";
 }
@@ -95,35 +88,76 @@ function section(title: string, lines: string[]): string {
   return [`## ${title}`, ...lines].join("\n");
 }
 
-function renderCriteria(criteria: Criterion[], proofs: CriterionProof[]): string[] {
-  if (criteria.length === 0) return ["Aucun critère."];
-  const proofByIndex = new Map(proofs.map((p) => [p.index, p]));
-  return [...criteria]
-    .sort((a, b) => a.index - b.index)
-    .map((criterion) => {
-      const text = oneLine(criterion.text);
-      const proof = proofByIndex.get(criterion.index);
+/** Bloc repliable GitLab : le titre reste visible, le détail s'ouvre au clic. */
+function collapsible(summary: string, lines: string[]): string {
+  return [`<details><summary>${escapeHtml(summary)}</summary>`, "", ...lines, "", "</details>"].join("\n");
+}
 
-      if (proof?.proven) {
-        const tests = proof.tests.map(codeSpan).join(", ");
-        const reason = oneLine(proof.reason);
-        let line = `- [x] ${text}`;
-        if (tests !== "") line += ` → ${tests}`;
-        if (reason !== "") line += ` : ${reason}`;
-        return line;
-      }
-      if (criterion.testable === false) {
-        return `- [ ] ${text} (non testable : ${oneLine(criterion.reason ?? "") || "raison non précisée"})`;
-      }
-      return `- [ ] ${text} (non prouvé : ${oneLine(proof?.reason ?? "") || "aucun test ne le prouve"})`;
-    });
+/** Ce que la CI n'a pas garanti : en tête, pour que le relecteur ne le rate pas. */
+function renderWarnings(input: MrDescriptionInput): string[] {
+  const lines: string[] = [];
+  if (input.ciAccepted) {
+    lines.push("- **CI rouge acceptée manuellement** (`sprintsaver run --accept-ci`) : aucun pipeline vert sur ce code.");
+  }
+  const noRunner = oneLine(input.ciNoRunnerPipelineUrl ?? "");
+  if (noRunner !== "") lines.push(`- **CI non exécutée** : aucun runner disponible ([pipeline](${noRunner})).`);
+  const flaky = [...new Set(input.flakyJobs.map(oneLine).filter((j) => j !== ""))];
+  if (flaky.length > 0) {
+    lines.push(`- ${flaky.length > 1 ? "Jobs instables" : "Job instable"} : ${flaky.map((j) => codeSpan(j)).join(", ")} (vert à la 2ᵉ tentative).`);
+  }
+  return lines;
+}
+
+/** Critères : ce qui reste à vérifier est visible, les critères prouvés sont repliés avec leurs tests. */
+function renderCriteria(criteria: Criterion[], proofs: CriterionProof[]): string {
+  if (criteria.length === 0) return section("Critères", ["Aucun critère."]);
+  const proofByIndex = new Map(proofs.map((p) => [p.index, p]));
+  const sorted = [...criteria].sort((a, b) => a.index - b.index);
+  const testable = sorted.filter((c) => c.testable !== false);
+  const proven: string[] = [];
+  const open: string[] = [];
+  for (const criterion of sorted) {
+    const text = clip(oneLine(criterion.text), CRITERION_CHARS);
+    const proof = proofByIndex.get(criterion.index);
+    if (criterion.testable !== false && proof?.proven) {
+      const tests = proof.tests.map(codeSpan).join(", ");
+      proven.push(`- [x] ${text}${tests !== "" ? ` → ${tests}` : ""}`);
+    } else if (criterion.testable === false) {
+      open.push(`- [ ] ${text} — à vérifier à la main : ${clip(oneLine(criterion.reason ?? ""), REASON_CHARS) || "raison non précisée"}`);
+    } else {
+      open.push(`- [ ] ${text} — non prouvé : ${clip(oneLine(proof?.reason ?? ""), REASON_CHARS) || "aucun test ne le prouve"}`);
+    }
+  }
+  const title = testable.length > 0 ? `Critères : ${proven.length}/${testable.length} prouvés` : "Critères";
+  const parts = [section(title, open)];
+  if (proven.length > 0) parts.push(collapsible(`Critères prouvés (${proven.length})`, proven));
+  return parts.join("\n\n");
+}
+
+/** Une ligne par fichier de test : le nom des tests se lit dans le diff. */
+function renderTests(tests: TestEntry[]): string[] {
+  if (tests.length === 0) return ["Aucun test ajouté ou modifié."];
+  const byFile = new Map<string, { added: number; modified: number }>();
+  for (const t of tests) {
+    const n = byFile.get(t.file) ?? { added: 0, modified: 0 };
+    if (t.change === "added") n.added += 1;
+    else n.modified += 1;
+    byFile.set(t.file, n);
+  }
+  return [...byFile].map(([file, n]) => {
+    const parts = [
+      n.added > 0 ? `${n.added} ajouté${n.added > 1 ? "s" : ""}` : "",
+      n.modified > 0 ? `${n.modified} modifié${n.modified > 1 ? "s" : ""}` : "",
+    ].filter((p) => p !== "");
+    return `- ${codeSpan(file)} : ${parts.join(", ")}`;
+  });
 }
 
 function renderCapture(capture: ScreenCapture): string[] {
   const before = capture.beforeMarkdown ?? "_écran inexistant avant ce changement_";
   const after = capture.afterMarkdown ?? "_capture indisponible_";
   const lines = ["", `### ${oneLine(capture.label) || "Écran"}`, "", "| Avant | Après |", "|---|---|", `| ${before} | ${after} |`];
-  const note = oneLine(capture.note);
+  const note = clip(oneLine(capture.note), NOTE_CHARS);
   if (note !== "") lines.push("", note);
   return lines;
 }
@@ -136,25 +170,13 @@ function renderDataChange(change: DataChange): string[] {
   const after = change.change === "removed" ? "" : change.after;
   const diff = lineDiff(before, after);
   const lines = ["", `### ${codeSpan(change.subject)} (${DATA_KIND_LABELS[change.kind]}, ${DATA_CHANGE_LABELS[change.change]})`];
-  const note = oneLine(change.note);
+  const note = clip(oneLine(change.note), NOTE_CHARS);
   if (note !== "") lines.push("", note);
   if (diff.length > 0) {
     const fence = fenceFor(diff.join("\n"));
     lines.push("", `${fence}diff`, ...diff, fence);
   }
   return lines;
-}
-
-/** Délimiteur de bloc de code plus long que toute suite de backticks du contenu (3 au minimum). */
-function fenceFor(content: string): string {
-  const longestRun = Math.max(0, ...(content.match(/`+/g) ?? []).map((run) => run.length));
-  return "`".repeat(Math.max(3, longestRun + 1));
-}
-
-function renderTest(test: TestEntry): string {
-  const change = test.change === "added" ? "ajouté" : "modifié";
-  const explanation = oneLine(test.explanation);
-  return `- ${codeSpan(test.name)} (${change}, ${codeSpan(test.file)})${explanation ? ` : ${explanation}` : ""}`;
 }
 
 function renderNit(nit: Finding): string {

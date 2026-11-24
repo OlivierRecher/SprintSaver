@@ -12,6 +12,25 @@ export function codeSpan(text: string): string {
   return `${fence}${pad}${value}${pad}${fence}`;
 }
 
+/** Délimiteur de bloc de code plus long que toute suite de backticks du contenu (3 au minimum). */
+export function fenceFor(content: string): string {
+  const longestRun = Math.max(0, ...(content.match(/`+/g) ?? []).map((run) => run.length));
+  return "`".repeat(Math.max(3, longestRun + 1));
+}
+
+/** Coupe un texte trop long sur un mot, avec « … ». */
+export function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+/** Échappe le texte placé dans une balise HTML (`<summary>`), où le markdown n'est pas fiable. */
+export function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** Ramène un texte sur une seule ligne (les retours à la ligne casseraient un élément de liste ou de tableau). */
 export function oneLine(text: string): string {
   return text.replace(/\s*\r?\n\s*/g, " ").trim();

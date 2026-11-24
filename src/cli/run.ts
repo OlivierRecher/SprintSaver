@@ -10,7 +10,7 @@ export function parseTicketRef(ref: string): { projectName: string; iid: number 
   return { projectName: m[1], iid: Number(m[2]) };
 }
 
-export async function runCommand(ref: string): Promise<void> {
+export async function runCommand(ref: string, opts: { acceptCi?: boolean } = {}): Promise<void> {
   const { projectName, iid } = parseTicketRef(ref);
   const config = await loadConfig();
   const project = findProject(config, projectName);
@@ -18,7 +18,12 @@ export async function runCommand(ref: string): Promise<void> {
   const app = buildApp(config);
   const stop = installStopHandler();
   try {
-    const state = await app.processor.process(project, iid, { manual: true, signal: stop.signal, abortNow: stop.immediateSignal });
+    const state = await app.processor.process(project, iid, {
+      manual: true,
+      signal: stop.signal,
+      abortNow: stop.immediateSignal,
+      acceptCi: opts.acceptCi,
+    });
     const out: string[] = [`${state.key} : ${state.phase}`];
     if (state.phase === "blocked") out.push(`Bloqué : ${state.blockedReason ?? "?"}`, `Worktree conservé : ${state.worktreePath}`);
     if (state.mrUrl) out.push(`MR : ${state.mrUrl}`);

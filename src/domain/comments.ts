@@ -1,66 +1,62 @@
 /** Textes des commentaires postés sur le ticket (français, markdown GitLab). ADR § 4. */
 import type { AnalysisResult } from "../contracts.js";
-import { codeSpan, listItem, mentionList, oneLine } from "./markdown.js";
+import { codeSpan, escapeHtml, fenceFor, listItem, mentionList, oneLine } from "./markdown.js";
 
 export const DEFAULT_TRIGGER_LABEL = "auto::ready";
 export const SIGNATURE = "<sub>SprintSaver</sub>";
 
 const TYPE_LABELS: Record<string, string> = { bug: "bug", feature: "fonctionnalité" };
-const TYPE_SOURCES: Record<AnalysisResult["typeSource"], string> = {
-  labels: "d'après les labels du ticket",
-  issue_type: "d'après le type GitLab du ticket",
-  agent: "déduit par l'analyse",
-};
 
 export function pickupComment(analysis: AnalysisResult, branch: string): string {
-  const blocks: string[] = ["**Pris en charge par SprintSaver.**"];
-
+  const sorted = [...analysis.criteria].sort((a, b) => a.index - b.index);
+  const testable = sorted.filter((c) => c.testable !== false);
+  const untestable = sorted.filter((c) => c.testable === false);
   const type = TYPE_LABELS[analysis.type] ?? analysis.type;
-  blocks.push(`**Type retenu** : ${type} (${TYPE_SOURCES[analysis.typeSource]})`);
+  const head = [
+    "**Pris en charge par SprintSaver**",
+    analysis.typeSource === "agent" ? `${type} (type déduit)` : type,
+    sorted.length > 0 ? `${testable.length}/${sorted.length} critères testables` : "aucune case à cocher",
+    `branche ${codeSpan(branch)}`,
+  ];
+  const blocks: string[] = [head.join(" · ")];
 
-  if (analysis.summary.trim() !== "") blocks.push(`### Résumé\n${analysis.summary.trim()}`);
-
-  if (analysis.plan.length > 0) {
-    blocks.push(["### Plan", ...analysis.plan.map((step, i) => listItem(`${i + 1}.`, step))].join("\n"));
-  }
-
-  blocks.push(renderCriteria(analysis.criteria));
-
-  const precedents = analysis.precedents.filter((p) => p.relevant);
-  if (precedents.length > 0) {
+  if (analysis.summary.trim() !== "") blocks.push(analysis.summary.trim());
+  if (untestable.length > 0) {
     blocks.push(
       [
-        "### Précédents retenus",
-        ...precedents.map((p) => `- ${oneLine(p.ref)}${oneLine(p.why) ? ` : ${oneLine(p.why)}` : ""}`),
+        "À vérifier à la main (non testables) :",
+        ...untestable.map((c) => `- ${oneLine(c.text)} — ${oneLine(c.reason ?? "") || "raison non précisée"}`),
       ].join("\n"),
     );
   }
-
-  if (analysis.assumptions.length > 0) {
-    blocks.push(["### Hypothèses", ...analysis.assumptions.map((a) => listItem("-", a))].join("\n"));
+  if (analysis.plan.length > 0) {
+    blocks.push(collapsible(`Plan (${analysis.plan.length} étapes)`, analysis.plan.map((step, i) => listItem(`${i + 1}.`, step))));
   }
-
-  blocks.push(`Branche de travail : ${codeSpan(branch)}`);
+  if (analysis.assumptions.length > 0) {
+    blocks.push(collapsible(`Hypothèses (${analysis.assumptions.length})`, analysis.assumptions.map((a) => listItem("-", a))));
+  }
+  const precedents = analysis.precedents.filter((p) => p.relevant);
+  if (precedents.length > 0) {
+    blocks.push(
+      collapsible(
+        `Précédents (${precedents.length})`,
+        precedents.map((p) => `- ${oneLine(p.ref)}${oneLine(p.why) ? ` : ${oneLine(p.why)}` : ""}`),
+      ),
+    );
+  }
   return finish(blocks);
 }
 
-function renderCriteria(criteria: AnalysisResult["criteria"]): string {
-  const sorted = [...criteria].sort((a, b) => a.index - b.index);
-  const testable = sorted.filter((c) => c.testable !== false);
-  const untestable = sorted.filter((c) => c.testable === false);
-  const lines = ["### Critères"];
-  if (sorted.length === 0) {
-    lines.push("Aucune case à cocher dans la description.");
-    return lines.join("\n");
-  }
-  lines.push(`**Testables (${testable.length})** — seront prouvés par un test :`);
-  lines.push(...(testable.length > 0 ? testable.map((c) => `- ${oneLine(c.text)}`) : ["- _aucun_"]));
-  if (untestable.length > 0) {
-    lines.push("", `**Non testables (${untestable.length})** — à vérifier manuellement, ne bloquent pas la livraison :`);
-    lines.push(
-      ...untestable.map((c) => `- ${oneLine(c.text)} — ${oneLine(c.reason ?? "") || "raison non précisée"}`),
-    );
-  }
+/** Bloc repliable GitLab : le titre reste visible, le détail s'ouvre au clic. */
+function collapsible(summary: string, lines: string[]): string {
+  return [`<details><summary>${escapeHtml(summary)}</summary>`, "", ...lines, "", "</details>"].join("\n");
+}
+
+/** Pied des commentaires de blocage : où est le travail et comment relancer. */
+function relaunchLine(input: { branch: string; mrUrl?: string; triggerLabel?: string; acceptCiRef?: string }, unblock: string): string {
+  const where = [`Branche ${codeSpan(input.branch)}`, ...(input.mrUrl ? [`[MR brouillon](${input.mrUrl})`] : [])].join(" · ");
+  const lines = [`${where}. ${unblock}, puis remettez ${codeSpan(input.triggerLabel ?? DEFAULT_TRIGGER_LABEL)}.`];
+  if (input.acceptCiRef) lines.push(`Pour livrer sans CI verte : ${codeSpan(`sprintsaver run ${input.acceptCiRef} --accept-ci`)}.`);
   return lines.join("\n");
 }
 
@@ -68,13 +64,41 @@ export function needsInfoComment(questions: string[], mentions: string[], trigge
   const blocks: string[] = [];
   const who = mentionList(mentions);
   if (who.length > 0) blocks.push(who.join(" "));
-  blocks.push("SprintSaver a besoin de précisions avant de pouvoir traiter ce ticket :");
+  blocks.push("**Précisions nécessaires** avant de traiter ce ticket :");
   const items = questions.map((q) => q.trim()).filter((q) => q !== "");
   if (items.length > 0) blocks.push(items.map((q, i) => listItem(`${i + 1}.`, q)).join("\n"));
   blocks.push(
-    `Répondez en commentaire puis remettez le label ${codeSpan(triggerLabel)} : SprintSaver reprendra le ticket en tenant compte de vos réponses.`,
+    `Répondez en commentaire, puis remettez ${codeSpan(triggerLabel)}.`,
   );
   return finish(blocks);
+}
+
+/** Job CI en échec et extrait utile de son log, montrés dans un commentaire de blocage. */
+export interface JobLogExcerpt {
+  name: string;
+  webUrl: string;
+  excerpt: string;
+}
+
+/** Un bloc repliable par job : le lien, puis l'extrait de son log (erreurs et fin). */
+function jobExcerptBlocks(jobs: JobLogExcerpt[] | undefined): string[] {
+  return (jobs ?? []).map((job) => {
+    const head = `${codeSpan(job.name)} : ${job.webUrl}`;
+    const excerpt = job.excerpt.trim();
+    if (excerpt === "") return `- ${head}`;
+    const fence = fenceFor(excerpt);
+    return [
+      `<details><summary>Log du job ${escapeHtml(oneLine(job.name))} (extrait)</summary>`,
+      "",
+      head,
+      "",
+      `${fence}text`,
+      excerpt,
+      fence,
+      "",
+      "</details>",
+    ].join("\n");
+  });
 }
 
 export function blockedComment(input: {
@@ -83,24 +107,29 @@ export function blockedComment(input: {
   branch: string;
   mrUrl?: string;
   mentions: string[];
+  /** Jobs CI en échec, avec un extrait de leur log. */
+  jobs?: JobLogExcerpt[];
+  /** Extrait de la sortie d'une commande en échec. */
+  output?: string;
+  /** Blocage pendant la CI : `<projet>#<iid>`, pour proposer `run --accept-ci`. */
+  acceptCiRef?: string;
   /** Label déclencheur (défaut `auto::ready`). */
   triggerLabel?: string;
 }): string {
   const blocks: string[] = [];
   const who = mentionList(input.mentions);
   if (who.length > 0) blocks.push(who.join(" "));
-  blocks.push(`**SprintSaver est bloqué sur ce ticket** : ${oneLine(input.reason)}`);
+  blocks.push(`**Bloqué** : ${oneLine(input.reason)}`);
 
   const details = input.details.map((d) => d.trim()).filter((d) => d !== "");
-  if (details.length > 0) blocks.push(["Détails :", ...details.map((d) => listItem("-", d))].join("\n"));
-
-  const state = [`- Travail en cours poussé sur la branche ${codeSpan(input.branch)}.`];
-  if (input.mrUrl) state.push(`- Merge request (brouillon) : ${input.mrUrl}`);
-  blocks.push(state.join("\n"));
-
-  blocks.push(
-    `Pour relancer : levez le blocage (réponse en commentaire, correction…) puis remettez le label ${codeSpan(input.triggerLabel ?? DEFAULT_TRIGGER_LABEL)}. SprintSaver reprendra sur la branche existante.`,
-  );
+  if (details.length > 0) blocks.push(details.map((d) => listItem("-", d)).join("\n"));
+  const output = input.output?.trim() ?? "";
+  if (output !== "") {
+    const fence = fenceFor(output);
+    blocks.push([`${fence}text`, output, fence].join("\n"));
+  }
+  blocks.push(...jobExcerptBlocks(input.jobs));
+  blocks.push(relaunchLine(input, "Levez le blocage"));
   return finish(blocks);
 }
 
@@ -109,6 +138,12 @@ export function baseCiBrokenComment(input: {
   pipelineUrl: string;
   branch: string;
   mentions: string[];
+  /** Jobs en échec sur la branche du ticket comme sur la branche par défaut (blocage sans relance). */
+  sharedJobs?: string[];
+  /** Jobs en échec sur la branche du ticket, avec un extrait de leur log. */
+  jobs?: JobLogExcerpt[];
+  /** `<projet>#<iid>`, pour proposer `run --accept-ci`. */
+  acceptCiRef?: string;
   /** Label déclencheur (défaut `auto::ready`). */
   triggerLabel?: string;
 }): string {
@@ -116,34 +151,22 @@ export function baseCiBrokenComment(input: {
   const who = mentionList(input.mentions);
   if (who.length > 0) blocks.push(who.join(" "));
   blocks.push(
-    `**La CI de ${codeSpan(input.defaultBranch)} est cassée, indépendamment de ce ticket.** SprintSaver s'arrête ici plutôt que de chercher à corriger une erreur qui n'est pas la sienne.`,
+    `**Bloqué : CI de ${codeSpan(input.defaultBranch)} cassée**, indépendamment de ce ticket ([dernier pipeline](${input.pipelineUrl})).`,
   );
-  blocks.push(
-    [
-      `- Dernier pipeline de ${codeSpan(input.defaultBranch)} : ${input.pipelineUrl}`,
-      `- Travail en cours poussé sur la branche ${codeSpan(input.branch)}.`,
-    ].join("\n"),
-  );
-  blocks.push(
-    `Une fois la CI de ${codeSpan(input.defaultBranch)} réparée, remettez le label ${codeSpan(input.triggerLabel ?? DEFAULT_TRIGGER_LABEL)} pour relancer.`,
-  );
+  const shared = input.sharedJobs ?? [];
+  if (shared.length > 0) {
+    blocks.push(`En échec ici comme sur ${codeSpan(input.defaultBranch)} : ${shared.map((name) => codeSpan(name)).join(", ")} (non relancés).`);
+  }
+  blocks.push(...jobExcerptBlocks(input.jobs));
+  blocks.push(relaunchLine(input, `Réparez la CI de ${codeSpan(input.defaultBranch)}`));
   return finish(blocks);
 }
 
-export function deliveredComment(input: {
-  mrUrl: string;
-  summary: string;
-  provenCount: number;
-  totalTestable: number;
-  untestable: string[];
-}): string {
-  const blocks: string[] = [`**Merge request prête à relire** : ${input.mrUrl}`];
-  if (input.summary.trim() !== "") blocks.push(input.summary.trim());
-  blocks.push(`Critères testables prouvés par un test : **${input.provenCount}/${input.totalTestable}** (cases cochées dans la description).`);
+export function deliveredComment(input: { mrUrl: string; provenCount: number; totalTestable: number; untestable: string[] }): string {
+  const head = `**MR prête à relire** : ${input.mrUrl}`;
+  const blocks = [input.totalTestable > 0 ? `${head} · ${input.provenCount}/${input.totalTestable} critères prouvés` : head];
   const untestable = input.untestable.map(oneLine).filter((u) => u !== "");
-  if (untestable.length > 0) {
-    blocks.push(["Critères non testables, à vérifier manuellement :", ...untestable.map((u) => `- ${u}`)].join("\n"));
-  }
+  if (untestable.length > 0) blocks.push(["À vérifier à la main :", ...untestable.map((u) => `- ${u}`)].join("\n"));
   return finish(blocks);
 }
 

@@ -7,7 +7,7 @@ import { z } from "zod";
 
 export const AnalyseOutput = z.object({
   type: z.enum(["bug", "feature"]).describe("Type retenu si les labels n'ont pas permis de trancher"),
-  summary: z.string().describe("Résumé du besoin en 2-4 phrases"),
+  summary: z.string().describe("Résumé du besoin en 2 ou 3 phrases courtes"),
   plan: z.array(z.string()).describe("Étapes prévues, courtes"),
   criteria: z
     .array(
@@ -101,7 +101,7 @@ export type VerifyCriteriaOutput = z.infer<typeof VerifyCriteriaOutput>;
 
 export const MrWriteupOutput = z.object({
   title: z.string().describe("Titre de MR concis, sans préfixe Draft"),
-  summary: z.string().describe("Résumé du changement pour le relecteur, 3-6 lignes"),
+  summary: z.string().describe("Résumé pour le relecteur : 2 à 4 puces d'une ligne"),
   changeKinds: z
     .array(z.enum(["ui", "data", "endpoint"]))
     .describe(
@@ -144,6 +144,11 @@ export const UiCapturesOutput = z.object({
   skippedReason: z
     .string()
     .describe("Si des écrans n'ont pas pu être capturés : pourquoi, en une ligne (app impossible à lancer, authentification…). Vide sinon"),
+  launchRecipe: z
+    .string()
+    .describe(
+      "Contenu complet de la section « Captures d'écran » du skill projet, mis à jour avec ce que tu as appris pour lancer l'application (Markdown, 20 lignes au plus). Vide si la section actuelle décrit déjà ce que tu as fait",
+    ),
 });
 export type UiCapturesOutput = z.infer<typeof UiCapturesOutput>;
 

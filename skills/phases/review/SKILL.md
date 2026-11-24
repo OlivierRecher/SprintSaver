@@ -62,4 +62,5 @@ Si on te demande de relire un delta (après une correction de review, de CI ou u
 ## Remplir la sortie
 
 - `findings` : `category` parmi `bug`, `criterion`, `security`, `regression`, `style`, `perf`, `other`, cohérente avec la sévérité.
+- `description` d'un nit : une ou deux phrases, le défaut puis la correction suggérée. Il est publié tel quel dans la MR. Un bloquant garde son scénario complet : il part à la session de correction.
 - `summary` : 2 à 4 lignes. Impression d'ensemble, ce que tu as vérifié (dont les écrans parcourus dans le navigateur), et pourquoi les bloquants bloquent.

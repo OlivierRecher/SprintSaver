@@ -17,6 +17,7 @@ import { extname, isAbsolute, join, normalize, relative, resolve, sep } from "no
 import type { z } from "zod";
 import {
   AgentRunError,
+  ProjectCommandError,
   TICKET_PHASES,
   type AgentRunResult,
   type AgentRunner,
@@ -26,6 +27,7 @@ import {
   type GitLabApi,
   type GitOps,
   type Issue,
+  type Job,
   type PhaseSummary,
   type Pipeline,
   type PipelineOutcome,
@@ -44,9 +46,12 @@ import {
   blockedComment,
   deliveredComment,
   needsInfoComment,
+  type JobLogExcerpt,
   pickupComment,
 } from "../domain/comments.js";
 import { renderMrDescription, type DataChange, type ScreenCapture } from "../domain/mr-description.js";
+import { codeSpan } from "../domain/markdown.js";
+import { CAPTURES_HEADING, launchRecipePatch } from "../domain/project-skill.js";
 import {
   AnalyseOutput,
   FixOutput,
@@ -59,6 +64,7 @@ import {
   WriteTestsOutput,
 } from "../phases/schemas.js";
 import * as P from "../phases/prompts.js";
+import { usefulExcerpt } from "../output-excerpt.js";
 import { branchName, errorMessage, extractFailingTests, mergeTests, shortFact, typeFromIssue } from "./util.js";
 
 export interface TicketProcessorDeps {
@@ -80,6 +86,19 @@ export interface ProcessOptions {
   signal?: AbortSignal;
   /** Arrêt immédiat (2e Ctrl+C) : la session agent en cours est interrompue, le ticket reste repris tel quel. */
   abortNow?: AbortSignal;
+  /**
+   * `run --accept-ci` : le ticket bloqué (ou interrompu) pendant la CI est livré sans pipeline vert. Le HEAD
+   * poussé est accepté tel quel, pour tout ce passage (y compris après un rebase), et la MR le signale.
+   */
+  acceptCi?: boolean;
+}
+
+/** Option incompatible avec l'état du ticket (`run --accept-ci` hors CI). */
+export class InvalidRunOption extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRunOption";
+  }
 }
 
 export interface TicketProcessor {
@@ -88,9 +107,25 @@ export interface TicketProcessor {
 
 /** Cause d'un blocage, qui détermine le commentaire posté. */
 export type BlockCause =
-  | { kind: "generic"; reason: string; details: string[] }
+  | {
+      kind: "generic";
+      reason: string;
+      details: string[];
+      jobs?: JobLogExcerpt[];
+      /** Extrait de la sortie d'une commande en échec (setup…), montré en bloc de code. */
+      output?: string;
+      /** Blocage de la boucle CI : `run --accept-ci` peut livrer quand même. */
+      ci?: boolean;
+    }
   | { kind: "needs-info"; reason: string; questions: string[] }
-  | { kind: "base-ci"; reason: string; pipelineUrl: string };
+  | {
+      kind: "base-ci";
+      reason: string;
+      pipelineUrl: string;
+      /** Jobs en échec sur le ticket comme sur la base : blocage sans relance. */
+      sharedJobs?: string[];
+      jobs?: JobLogExcerpt[];
+    };
 
 /** Levée par une phase pour faire passer le ticket en `blocked`. */
 export class TicketBlocked extends Error {
@@ -120,6 +155,10 @@ const IMAGES_SUBDIR = join(".sprintsaver", "images");
 const CAPTURES_SUBDIR = join(".sprintsaver", "captures");
 /** Écrans capturés au plus par MR (chaque écran = une paire avant/après). */
 export const MAX_UI_SCREENS = 4;
+/** Extrait du log d'un job CI dans un commentaire de blocage. */
+const BLOCK_LOG_EXCERPT_CHARS = 1_500;
+/** Extrait du log d'un job CI dans le résumé de phase lu par la rétro. */
+const FACT_LOG_EXCERPT_CHARS = 500;
 const CAPTURE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 
 /** Contenu « avant/après » de la description de MR : captures d'écran et changements de données. */
@@ -145,10 +184,23 @@ export function createTicketProcessor(deps: TicketProcessorDeps): TicketProcesso
         return existing;
       }
 
+      if (opts.acceptCi) {
+        const inCi = existing?.phase === "pushed" || (existing?.phase === "blocked" && existing.blockedByCi === true);
+        if (!existing || !inCi) {
+          throw new InvalidRunOption(
+            `--accept-ci ne s'applique qu'à un ticket arrêté ou bloqué pendant la CI (${key} : ${existing ? existing.phase : "jamais traité"}).`,
+          );
+        }
+      }
+
       const run = new TicketRun(deps, project, iid, opts.signal, opts.abortNow);
       await run.init();
+      run.acceptCi = opts.acceptCi === true;
       let startPicking = false;
-      if (!existing) {
+      if (existing && opts.acceptCi) {
+        await run.takeTriggerLabel();
+        await run.resumeAcceptingCi(existing);
+      } else if (!existing) {
         const issue = await deps.gitlab.getIssue(project.id, iid);
         await run.takeTriggerLabel();
         await run.restoreLabelOnFailure(() => run.createState(issue));
@@ -200,6 +252,10 @@ class TicketRun {
   private rewritten = false;
   /** Dernier sha poussé par ce processus (évite les pushes redondants ; inconnu après une reprise). */
   private lastPushedSha?: string;
+  /** `run --accept-ci` : la CI de ce passage est acceptée sans pipeline vert. */
+  acceptCi = false;
+  /** Logs des jobs CI déjà lus (clé `projet:job`) : résumé de phase, ci-fix et blocage lisent le même. */
+  private readonly jobLogs = new Map<string, string>();
   /** Début du segment de temps actif pas encore compté dans `state.activeMs` (epoch ms). */
   private activeMark: number;
 
@@ -321,6 +377,8 @@ class TicketRun {
       reviewedSha: _sha,
       ciGreenSha: _green,
       ciNoRunnerPipelineUrl: _noRunner,
+      ciAccepted: _accepted,
+      blockedByCi: _byCi,
       pendingForcePush: _force,
       pendingRebaseReview: _rebase,
       proofsStale: _stale,
@@ -348,6 +406,25 @@ class TicketRun {
       `Reprise du ticket bloqué ${this.key} (bloqué pour : ${previous.blockedReason ?? "?"})`,
     );
     await this.save();
+  }
+
+  /**
+   * `run --accept-ci` (ADR, amendement 7) : reprise d'un ticket bloqué ou interrompu pendant la CI, sans refaire
+   * l'analyse. La boucle CI acceptera le HEAD poussé. Un worktree supprimé depuis le blocage est recréé depuis
+   * le remote.
+   */
+  async resumeAcceptingCi(previous: TicketState): Promise<void> {
+    const { blockedReason: _reason, phaseBeforeBlock: _before, blockedByCi: _byCi, ...rest } = previous;
+    this.stateRef = { ...rest, phase: "pushed" };
+    this.activeMark = this.now().getTime();
+    log.warn({ ticket: this.key }, `${this.key} : CI acceptée manuellement, livraison sans pipeline vert`);
+    await this.save();
+    if (!existsSync(this.wt)) {
+      const { git } = this.deps;
+      await git.ensureReferenceClone(this.project);
+      await git.createOrReuseWorktree(this.project, this.state.branch, this.wt);
+      await git.prepareWorktree(this.project, this.wt, this.limits.commandTimeoutMin * 60_000);
+    }
   }
 
   adopt(state: TicketState): void {
@@ -897,12 +974,21 @@ class TicketRun {
     const startedAt = this.now();
     const t0 = Date.now();
     const outcome = await run();
+    const durationMs = Date.now() - t0;
     const failedJobs = outcome.kind === "failed" ? outcome.failedJobs.map((j) => j.name) : [];
+    // Extrait d'erreur de chaque job en échec : la rétro distingue ainsi une panne d'infrastructure d'une
+    // commande locale incomplète.
+    const logFacts =
+      outcome.kind === "failed"
+        ? (await this.failedJobLogs(outcome.failedJobs)).map(({ job, log: jobLog }) =>
+            shortFact(`log de ${job.name} : ${usefulExcerpt(jobLog, FACT_LOG_EXCERPT_CHARS, 8).split("\n").join(" | ")}`, FACT_LOG_EXCERPT_CHARS + 100),
+          )
+        : [];
     await this.record({
       phase: "ci",
       iteration: this.nextIteration("ci"),
       startedAt: startedAt.toISOString(),
-      durationMs: Date.now() - t0,
+      durationMs,
       outcome:
         outcome.kind === "success" || outcome.kind === "none" || outcome.kind === "no-runner"
           ? "ok"
@@ -912,13 +998,76 @@ class TicketRun {
       facts: [
         `${kind === "retry" ? "relance des jobs en échec" : "pipeline"} sur ${sha.slice(0, 8)} : ${outcome.kind}`,
         ...(failedJobs.length > 0 ? [shortFact(`jobs en échec : ${failedJobs.join(", ")}`, 400)] : []),
+        ...logFacts,
       ],
     });
     return outcome;
   }
 
+  /** Logs des jobs en échec, lus une seule fois par job. Un log illisible est remplacé par la raison. */
+  private async failedJobLogs(jobs: Job[]): Promise<{ job: Job; log: string }[]> {
+    const out: { job: Job; log: string }[] = [];
+    for (const job of jobs) {
+      // Job d'un pipeline enfant d'un autre projet : son log est dans ce projet-là.
+      const projectId = job.projectId ?? this.project.id;
+      const key = `${projectId}:${job.id}`;
+      let jobLog = this.jobLogs.get(key);
+      if (jobLog === undefined) {
+        try {
+          jobLog = await this.deps.gitlab.jobLog(projectId, job.id, P.MAX_LOG_CHARS);
+        } catch (err) {
+          jobLog = `(log indisponible : ${errorMessage(err)})`;
+        }
+        this.jobLogs.set(key, jobLog);
+      }
+      out.push({ job, log: jobLog });
+    }
+    return out;
+  }
+
+  /** Extraits de logs des jobs en échec, pour un commentaire de blocage. */
+  private async jobExcerpts(jobs: Job[]): Promise<JobLogExcerpt[]> {
+    return (await this.failedJobLogs(jobs)).map(({ job, log: jobLog }) => ({
+      name: job.name,
+      webUrl: job.webUrl,
+      excerpt: usefulExcerpt(jobLog, BLOCK_LOG_EXCERPT_CHARS, 15),
+    }));
+  }
+
   /**
-   * Boucle CI (ADR § 7.6) : relance unique des jobs, base cassée, ci-fix, re-review du delta.
+   * Jobs en échec sur le ticket qui échouent aussi sur le dernier pipeline terminé de la branche par défaut.
+   * Une relance de ces jobs échouerait presque sûrement, et la base rouge bloquerait ensuite le ticket : autant
+   * couper avant (ADR § 7.6, amendement 6). `null` si la base est verte, sans job commun, ou illisible.
+   */
+  private async failuresSharedWithBase(failed: Job[]): Promise<{ pipeline: Pipeline; jobs: string[] } | null> {
+    const { gitlab } = this.deps;
+    const base = await gitlab.latestFinishedPipeline(this.project.id, this.project.defaultBranch);
+    if (base?.status !== "failed") return null;
+    let baseFailed: Job[];
+    try {
+      baseFailed = await gitlab.pipelineFailedJobs(this.project.id, base.id);
+    } catch (err) {
+      log.warn({ ticket: this.key, pipeline: base.webUrl, err: errorMessage(err) }, "Jobs en échec de la base illisibles");
+      return null;
+    }
+    const baseNames = new Set(baseFailed.map((j) => j.name));
+    const shared = [...new Set(failed.map((j) => j.name).filter((name) => baseNames.has(name)))];
+    return shared.length > 0 ? { pipeline: base, jobs: shared } : null;
+  }
+
+  private async baseCiBlocked(base: Pipeline, failed: Job[], sharedJobs?: string[]): Promise<TicketBlocked> {
+    return new TicketBlocked({
+      kind: "base-ci",
+      reason: `CI de ${this.project.defaultBranch} cassée, indépendante du ticket`,
+      pipelineUrl: base.webUrl,
+      sharedJobs,
+      jobs: await this.jobExcerpts(failed),
+    });
+  }
+
+  /**
+   * Boucle CI (ADR § 7.6, amendement 6) : jobs en échec aussi sur la base (blocage sans relance), relance unique
+   * des jobs, base cassée, ci-fix, re-review du delta.
    *
    * Chaque itération commence par relire ce qui ne l'a pas été (`ensureReviewed` : correctif commité puis
    * crash avant la fin de sa review, ou preuves périmées), puis pousse la branche : un correctif commité mais
@@ -937,6 +1086,7 @@ class TicketRun {
       await this.ensureReviewed();
       await this.pushBranch();
       const sha = await git.headSha(this.wt);
+      if (this.acceptCi) return this.markCiGreen(sha, { accepted: true });
       let outcome = await this.waitCi(sha, "wait", () =>
         gitlab.waitForPipeline({ project: this.project, sha, branch: this.state.branch, mrIid: this.state.mrIid, timeoutMs }),
       );
@@ -964,6 +1114,15 @@ class TicketRun {
 
       const retried = this.state.ciRetriedShas ?? [];
       if (!retried.includes(sha)) {
+        // Avant la relance : des jobs qui échouent aussi sur la base ne seront pas réparés par une relance.
+        const shared = await this.failuresSharedWithBase(outcome.failedJobs);
+        if (shared) {
+          log.info(
+            { ticket: this.key, jobs: shared.jobs, pipeline: shared.pipeline.webUrl },
+            `Jobs en échec aussi sur ${this.project.defaultBranch} : pas de relance`,
+          );
+          throw await this.baseCiBlocked(shared.pipeline, outcome.failedJobs, shared.jobs);
+        }
         this.state.ciRetriedShas = [...retried, sha];
         await this.save();
         const failed = outcome;
@@ -982,13 +1141,7 @@ class TicketRun {
       }
 
       const base = await gitlab.latestFinishedPipeline(this.project.id, this.project.defaultBranch);
-      if (base?.status === "failed") {
-        throw new TicketBlocked({
-          kind: "base-ci",
-          reason: `CI de ${this.project.defaultBranch} cassée, indépendante du ticket`,
-          pipelineUrl: base.webUrl,
-        });
-      }
+      if (base?.status === "failed") throw await this.baseCiBlocked(base, outcome.failedJobs);
 
       this.state.counters.ci += 1;
       await this.save();
@@ -997,20 +1150,17 @@ class TicketRun {
           kind: "generic",
           reason: `plafond d'itérations CI atteint (${this.limits.ci})`,
           details: [`Pipeline : ${outcome.pipeline.webUrl}`, `Jobs en échec : ${outcome.failedJobs.map((j) => j.name).join(", ")}`],
+          jobs: await this.jobExcerpts(outcome.failedJobs),
+          ci: true,
         });
       }
 
-      const jobs = [];
-      for (const job of outcome.failedJobs) {
-        let jobLog: string;
-        try {
-          // Job d'un pipeline enfant d'un autre projet : son log est dans ce projet-là.
-          jobLog = await gitlab.jobLog(job.projectId ?? this.project.id, job.id, P.MAX_LOG_CHARS);
-        } catch (err) {
-          jobLog = `(log indisponible : ${errorMessage(err)})`;
-        }
-        jobs.push({ name: job.name, stage: job.stage, webUrl: job.webUrl, log: jobLog });
-      }
+      const jobs = (await this.failedJobLogs(outcome.failedJobs)).map(({ job, log: jobLog }) => ({
+        name: job.name,
+        stage: job.stage,
+        webUrl: job.webUrl,
+        log: jobLog,
+      }));
       const ticket = await this.ticketContext();
       const fix = await this.runAgent(
         "ci-fix",
@@ -1034,9 +1184,10 @@ class TicketRun {
     }
   }
 
-  private async markCiGreen(sha: string, noRunnerPipelineUrl?: string): Promise<void> {
+  private async markCiGreen(sha: string, opts: { noRunnerPipelineUrl?: string; accepted?: boolean } = {}): Promise<void> {
     this.state.ciGreenSha = sha;
-    this.state.ciNoRunnerPipelineUrl = noRunnerPipelineUrl;
+    this.state.ciNoRunnerPipelineUrl = opts.noRunnerPipelineUrl;
+    this.state.ciAccepted = opts.accepted || undefined;
     await this.save();
   }
 
@@ -1046,7 +1197,7 @@ class TicketRun {
       { ticket: this.key, sha: sha.slice(0, 8), pipeline: pipeline.webUrl },
       "Pipeline en attente : aucun runner disponible, CI sautée",
     );
-    return this.markCiGreen(sha, pipeline.webUrl);
+    return this.markCiGreen(sha, { noRunnerPipelineUrl: pipeline.webUrl });
   }
 
   /**
@@ -1067,8 +1218,6 @@ class TicketRun {
       log.info({ ticket: this.key, mr: this.state.mrUrl }, "Reprise de la livraison : MR déjà passée en Ready");
     }
     const analysis = this.analysis();
-    const summary = steps.summary ?? analysis.summary;
-
     // 3. Cases prouvées cochées sur le ticket (description relue fraîchement).
     const testable = analysis.criteria.filter((c) => c.testable);
     const proven = this.state.proofs
@@ -1098,7 +1247,6 @@ class TicketRun {
         this.iid,
         deliveredComment({
           mrUrl: this.state.mrUrl ?? "",
-          summary,
           provenCount: proven.length,
           totalTestable: testable.length,
           untestable: analysis.criteria.filter((c) => !c.testable).map((c) => `${c.text}${c.reason ? ` (${c.reason})` : ""}`),
@@ -1278,7 +1426,9 @@ class TicketRun {
     }
 
     st.phaseBeforeBlock = st.phase;
-    st.blockedReason = cause.reason;
+    st.blockedByCi = isCiBlock(cause) || undefined;
+    // Avec l'extrait de sortie : affiché par `run`/`status` et lu par la rétro.
+    st.blockedReason = cause.kind === "generic" && cause.output ? `${cause.reason}\n${cause.output}` : cause.reason;
     st.phase = "blocked";
     await this.save();
   }
@@ -1293,16 +1443,22 @@ class TicketRun {
       }
       case "base-ci":
         return baseCiBrokenComment({
+          acceptCiRef: this.ticketRef(),
           defaultBranch: this.project.defaultBranch,
           pipelineUrl: cause.pipelineUrl,
           branch: this.state.branch,
           mentions: [me],
+          sharedJobs: cause.sharedJobs,
+          jobs: cause.jobs,
           triggerLabel: config.triggerLabel,
         });
       case "generic":
         return blockedComment({
           reason: cause.reason,
           details: cause.details,
+          jobs: cause.jobs,
+          output: cause.output,
+          acceptCiRef: cause.ci ? this.ticketRef() : undefined,
           branch: this.state.branch,
           mrUrl: this.state.mrUrl,
           mentions: [me],
@@ -1312,8 +1468,43 @@ class TicketRun {
   }
 
   // -------------------------------------------------------------------------
-  // Rétro
+  // Skill projet : rétro, recette de lancement
   // -------------------------------------------------------------------------
+
+  /** `skills/projects/<projet>.md` du dépôt SprintSaver, ou null s'il n'existe pas. */
+  private async readProjectSkill(file = `${this.project.name}.md`): Promise<string | null> {
+    try {
+      return await readFile(join(this.deps.skillsRepoRoot ?? toolRoot(), "skills", "projects", file), "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Recette de lancement trouvée par la session de captures (ADR, amendement 7) : proposée en patch sur la
+   * section « Captures d'écran » du skill projet, pour que les reviews et captures suivantes repartent de là.
+   * Sans effet sur la livraison si l'écriture échoue.
+   */
+  private async proposeLaunchRecipe(recipe: string): Promise<void> {
+    if (recipe.trim() === "") return;
+    try {
+      const root = this.deps.skillsRepoRoot ?? toolRoot();
+      const patch = launchRecipePatch({
+        projectName: this.project.name,
+        current: await this.readProjectSkill(),
+        template: (await this.readProjectSkill("_template.md")) ?? `# Projet <nom>\n\n${CAPTURES_HEADING}\n`,
+        recipe,
+      });
+      if (!patch) return;
+      const dir = paths.run(this.key);
+      await mkdir(dir, { recursive: true });
+      const patchPath = join(dir, "launch-recipe.patch");
+      await writeFile(patchPath, patch, "utf8");
+      log.info({ ticket: this.key, patch: patchPath }, `Recette de lancement proposée dans ${patchPath} (git apply dans ${root})`);
+    } catch (err) {
+      log.warn({ ticket: this.key, err: errorMessage(err) }, "Recette de lancement non écrite");
+    }
+  }
 
   private async retro(): Promise<void> {
     const { config, recorder } = this.deps;
@@ -1321,12 +1512,7 @@ class TicketRun {
     if (!config.retro.enabled || (st.phase !== "finalized" && st.phase !== "blocked")) return;
     try {
       const root = this.deps.skillsRepoRoot ?? toolRoot();
-      let projectSkill: string | null = null;
-      try {
-        projectSkill = await readFile(join(root, "skills", "projects", `${this.project.name}.md`), "utf8");
-      } catch {
-        projectSkill = null;
-      }
+      const projectSkill = await this.readProjectSkill();
       const summaries = await recorder.readSummaries(this.key);
       const res = await this.runAgent(
         "retro",
@@ -1452,6 +1638,7 @@ class TicketRun {
         (o) => [shortFact(`captures : ${o.captures.length}/${screens.length}`), ...(o.skippedReason ? [shortFact(`manquantes : ${o.skippedReason}`)] : [])],
         { extraWritableRoots: [basePath] },
       );
+      await this.proposeLaunchRecipe(res.output.launchRecipe);
       return await this.publishCaptures(res.output, capturesDir);
     } catch (err) {
       if ((err instanceof AgentRunError && err.reason === "aborted") || this.stopSignal?.aborted) throw err;
@@ -1515,6 +1702,11 @@ class TicketRun {
     }
   }
 
+  /** Référence `<projet>#<iid>` attendue par `sprintsaver run`. */
+  private ticketRef(): string {
+    return `${this.project.name}#${this.iid}`;
+  }
+
   private mrDescription(inProgress: boolean, summary?: string, showcase?: Showcase): string {
     const st = this.state;
     const a = st.analysis;
@@ -1529,6 +1721,7 @@ class TicketRun {
       nits: st.nits,
       flakyJobs: st.flakyJobs,
       ciNoRunnerPipelineUrl: st.ciNoRunnerPipelineUrl,
+      ciAccepted: st.ciAccepted,
       captures: showcase?.captures,
       capturesMissing: showcase?.capturesMissing,
       dataChanges: showcase?.dataChanges,
@@ -1621,6 +1814,14 @@ const AGENT_ERROR_LABELS: Record<AgentRunError["reason"], string> = {
 
 export function toBlockCause(err: unknown): BlockCause {
   if (err instanceof TicketBlocked) return err.block;
+  if (err instanceof ProjectCommandError) {
+    return {
+      kind: "generic",
+      reason: err.message,
+      details: [`Commande : ${codeSpan(err.command)}`],
+      output: usefulExcerpt(err.output, BLOCK_LOG_EXCERPT_CHARS, 15),
+    };
+  }
   if (err instanceof AgentRunError) {
     return {
       kind: "generic",
@@ -1631,15 +1832,21 @@ export function toBlockCause(err: unknown): BlockCause {
   return { kind: "generic", reason: `erreur technique : ${errorMessage(err)}`, details: [] };
 }
 
+/** Blocage de la boucle CI (base cassée, plafond, pipeline annulé ou trop long). */
+function isCiBlock(cause: BlockCause): boolean {
+  return cause.kind === "base-ci" || (cause.kind === "generic" && cause.ci === true);
+}
+
 function ciStopped(outcome: PipelineOutcome, timeoutMin: number): TicketBlocked {
   if (outcome.kind === "canceled") {
-    return new TicketBlocked({ kind: "generic", reason: "pipeline CI annulé", details: [`Pipeline : ${outcome.pipeline.webUrl}`] });
+    return new TicketBlocked({ kind: "generic", reason: "pipeline CI annulé", details: [`Pipeline : ${outcome.pipeline.webUrl}`], ci: true });
   }
   const url = outcome.kind === "timeout" ? outcome.pipeline?.webUrl : undefined;
   return new TicketBlocked({
     kind: "generic",
     reason: `CI non terminée après ${timeoutMin} min`,
     details: url ? [`Pipeline : ${url}`] : [],
+    ci: true,
   });
 }
 

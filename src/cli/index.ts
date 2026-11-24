@@ -2,6 +2,7 @@
 import { Command, CommanderError } from "commander";
 import { ConfigError } from "../config/load.js";
 import { LockError } from "../state/lock.js";
+import { InvalidRunOption } from "../engine/processor.js";
 import { runInit } from "./init.js";
 import { watchCommand } from "./watch.js";
 import { runCommand } from "./run.js";
@@ -14,7 +15,7 @@ function action<A extends unknown[]>(fn: (...args: A) => Promise<void>): (...arg
       await fn(...args);
     } catch (err) {
       // process.exitCode plutôt que process.exit : laisse le logger (flux asynchrone) se vider.
-      console.error(err instanceof ConfigError || err instanceof LockError ? err.message : err instanceof Error ? (err.stack ?? err.message) : String(err));
+      console.error(err instanceof ConfigError || err instanceof LockError || err instanceof InvalidRunOption ? err.message : err instanceof Error ? (err.stack ?? err.message) : String(err));
       process.exitCode = 1;
     }
   };
@@ -87,7 +88,8 @@ program
   .command("run")
   .argument("<ticket>", "ticket à traiter, sous la forme <projet>#<iid>")
   .description("Traite ce ticket tout de suite, label ou non")
-  .action(action((ref: string) => runCommand(ref)));
+  .option("--accept-ci", "livre un ticket bloqué pendant la CI sans pipeline vert (signalé dans la MR)")
+  .action(action((ref: string, opts: { acceptCi?: boolean }) => runCommand(ref, opts)));
 
 program
   .command("status")

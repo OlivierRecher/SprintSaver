@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { paths } from "../../src/config/paths.js";
 import type { ProjectConfig } from "../../src/config/schema.js";
 import { createGitOps } from "../../src/git/gitops.js";
+import { ProjectCommandError } from "../../src/contracts.js";
 
 const TOKEN = "glpat-super-secret-token";
 const saved: Record<string, string | undefined> = {};
@@ -209,9 +210,14 @@ describe("worktrees", () => {
     expect(existsSync(join(wt2, "local", "deep", "conf.json"))).toBe(true);
     expect(existsSync(join(wt2, ".env"))).toBe(false);
 
-    await expect(
-      ops.prepareWorktree({ ...p, setupCommand: "echo boom-output; exit 3", cowDirs: [] }, wt2, 30_000),
-    ).rejects.toThrow(/boom-output/);
+    // Échec : message court, sortie gardée à part pour l'extrait du commentaire de blocage.
+    const err = await ops
+      .prepareWorktree({ ...p, setupCommand: "echo boom-output; exit 3", cowDirs: [] }, wt2, 30_000)
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(ProjectCommandError);
+    expect((err as ProjectCommandError).message).toBe("setup du projet en échec (code 3)");
+    expect((err as ProjectCommandError).command).toBe("echo boom-output; exit 3");
+    expect((err as ProjectCommandError).output).toContain("boom-output");
   });
 
   it("prepareWorktree : localCheckout sert de source aux fichiers ignorés et aux cowDirs", async () => {

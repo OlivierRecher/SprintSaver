@@ -5,7 +5,7 @@ Chaque fichier `skills/projects/<nom>.md` contient ce qu'un agent doit savoir su
 ## Comment le fichier est utilisé
 
 - L'orchestrateur l'injecte dans le prompt système de toutes les sessions d'un ticket de ce projet, après le skill de phase et le skill de type, avant le `CLAUDE.md` du dépôt cible. Il n'est jamais chargé pour un autre projet.
-- Il est alimenté à la main et par la rétro. En fin de ticket, la rétro propose un patch dans `~/.sprintsaver/runs/<projet>-<iid>/retro.patch`. Relis-le, puis applique-le depuis la racine du dépôt SprintSaver avec `git apply <chemin>`.
+- Il est alimenté à la main, par la rétro et par la session de captures. En fin de ticket, la rétro peut proposer `~/.sprintsaver/runs/<projet>-<iid>/retro.patch`, et la session de captures `launch-recipe.patch` (section « Captures d'écran » : comment lancer l'application). Relis-les, puis applique-les depuis la racine du dépôt SprintSaver avec `git apply <chemin>`.
 - Un projet sans fichier fonctionne quand même. La section se construit au fil des tickets.
 
 ## Ce qui y va

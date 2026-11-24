@@ -42,5 +42,17 @@ Les captures ne doivent pas coûter plus que le ticket. Si l'application ne dém
 ## Remplir la sortie
 
 - `captures` : une entrée par écran réussi, dans l'ordre de la liste. `before` et `after` sont des chemins relatifs au répertoire courant, dans le dossier de captures indiqué.
-- `note` : ce que le relecteur doit remarquer (« le total apparaît sous la liste »), ou les données de démo utilisées. Vide si l'image parle d'elle-même.
+- `note` : ce que le relecteur doit remarquer, en une phrase courte (« le total apparaît sous la liste »). Vide si l'image parle d'elle-même. Pas la description des données de démo.
 - `skippedReason` : vide si tous les écrans demandés sont capturés.
+- `launchRecipe` : voir ci-dessous.
+
+## Recette de lancement
+
+Ce que tu as appris pour lancer l'application servira aux prochaines reviews et captures du projet : l'orchestrateur le propose en patch sur la section « Captures d'écran » du skill projet. Si cette section décrit déjà ce que tu as fait, laisse `launchRecipe` vide. Sinon, écris le contenu complet de la section, mis à jour (Markdown, 20 lignes au plus) :
+
+- commandes de build et de lancement, ports, variables d'environnement nécessaires (noms, jamais de vraie valeur secrète) ;
+- données et compte de démo, ou comment contourner la connexion ;
+- services à simuler et comment (par exemple « Supabase simulé : un serveur Node qui répond à `/auth/v1/token` et `/rest/v1/events` ») ; un fichier écrit dans `/tmp` disparaît, décris donc ce qu'il fait plutôt que son chemin ;
+- écrans impossibles à capturer, et pourquoi.
+
+Des faits durables, sans le récit de cette session ni les détails propres à ce ticket.

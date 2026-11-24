@@ -116,6 +116,10 @@ export class FakeGitLab implements GitLabApi {
   pipelineOutcomes: PipelineOutcome[] = [];
   retryOutcomes: PipelineOutcome[] = [];
   base: Pipeline | null = basePipeline("success");
+  /** Jobs en échec du dernier pipeline de la branche par défaut (`base`). */
+  baseFailedJobs: Job[] = [];
+  /** Logs de jobs par id (sinon un log générique). */
+  jobLogs = new Map<number, string>();
   existingMr: MrRef | null = null;
   mrUpdates: { mrIid: number; patch: { title?: string; description?: string; assigneeIds?: number[] } }[] = [];
   descriptions: string[] = [];
@@ -209,9 +213,13 @@ export class FakeGitLab implements GitLabApi {
     this.log.push("gitlab.latestFinishedPipeline");
     return this.base;
   }
+  async pipelineFailedJobs(_projectId: number, pipelineId: number): Promise<Job[]> {
+    this.log.push(`gitlab.pipelineFailedJobs:${pipelineId}`);
+    return this.baseFailedJobs;
+  }
   async jobLog(projectId: number, jobId: number): Promise<string> {
     this.jobLogCalls.push({ projectId, jobId });
-    return `log du job ${jobId}\nError: expected 2 got 3`;
+    return this.jobLogs.get(jobId) ?? `log du job ${jobId}\nError: expected 2 got 3`;
   }
   async searchIssues() {
     return [];
@@ -472,7 +480,7 @@ export class FakeAgent implements AgentRunner {
       case "mr-writeup":
         return { title: "Total du panier", summary: "Ajoute le total arrondi.", changeKinds: [], uiScreens: [], dataChanges: [] };
       case "ui-captures":
-        return { captures: [], skippedReason: "" };
+        return { captures: [], skippedReason: "", launchRecipe: "" };
       case "retro":
         return { lessons: ["lancer les tests plus tôt"], patch: "--- a/skills/projects/demo.md\n+++ b/skills/projects/demo.md\n@@ -0,0 +1 @@\n+piège" };
       default:

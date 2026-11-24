@@ -88,7 +88,7 @@ Conséquence : on ne plafonne pas un budget en dollars. Les plafonds portent sur
 
 **Commits** : un commit par étape logique au format conventional commits (`test:`, `feat:`/`fix:`, `fix(review):`, `fix(ci):`), à l'identité git de l'utilisateur, **sans trailer de co-auteur**.
 
-**Description de la MR** :
+**Description de la MR** (format remplacé par l'amendement 7) :
 
 ```
 ## Ticket #<iid>
@@ -149,7 +149,7 @@ Mode `bypassPermissions`, avec le répertoire de travail fixé sur le worktree. 
 - Commandes :
   - `sprintsaver init` : scan de GitLab et choix des projets. ~~Les commandes sont **proposées par une session Claude en lecture seule** (outils Read, Glob, Grep), puis validées une à une par l'utilisateur. Une détection simple prend le relais si l'analyse échoue. Viennent ensuite le mapping des statuts et la création des labels manquants, sur proposition.~~ Remplacé par l'amendement 5 : un agent de configuration propose la config complète de chaque projet, commandes vérifiées par une exécution réelle, et l'utilisateur la valide avant toute écriture. La config produite reste modifiable à la main ;
   - `sprintsaver watch` : boucle continue ;
-  - `sprintsaver run <projet>#<iid>` : traite un ticket précis tout de suite, même sans label ;
+  - `sprintsaver run <projet>#<iid>` : traite un ticket précis tout de suite, même sans label ; `--accept-ci` livre un ticket bloqué par la CI sans pipeline vert (amendement 7) ;
   - `sprintsaver status` : ticket en cours, phase, file d'attente.
 - Mode de test par projet : `local` par défaut. `ci-only` pour les projets qui ne peuvent pas tester en local : la boucle test/fix passe alors par des pushes et la CI.
 
@@ -345,6 +345,68 @@ La session en lecture seule de `init` proposait setup, build et test d'après la
   - un gestionnaire de versions qui installe à la volée une version absente (`mise exec`, par exemple) n'est pas bloqué par la politique : le prompt demande de n'utiliser que des versions déjà installées ;
   - les noms des fichiers ignorés du checkout local (pas leur contenu) sont envoyés au modèle ;
   - le diagnostic « ligne de base rouge » est une heuristique sur la sortie des lanceurs de tests ; l'agent la confirme ou la corrige, et l'utilisateur voit l'extrait.
+
+## Amendement 6 — Base consultée avant la relance, logs des jobs dans les blocages (2026-11-24)
+
+- **Statut** : accepté. Modifie la boucle CI du § 7.6.
+
+### Contexte
+
+Sur un ticket réel, les jobs `db`, `ops-service` et `edge-functions` échouaient aussi sur la branche par défaut. La relance a coûté 21 minutes de pipeline avant que l'outil ne regarde la base et ne bloque. Le commentaire de blocage et le résumé de phase lu par la rétro ne donnaient que les noms des jobs : ni l'humain ni la rétro ne pouvaient distinguer une panne d'infrastructure d'une commande locale incomplète.
+
+### Décision
+
+- **Avant la relance**, l'outil lit le dernier pipeline terminé de la branche par défaut. S'il est rouge et qu'au moins un job en échec sur le ticket échoue aussi sur la base (même nom, pipelines aval compris), il **coupe sans relancer** : blocage « CI de `<branche>` cassée », comme au § 7.6, avec la liste des jobs communs. Une relance de ces jobs échouerait presque sûrement, et la base rouge bloquerait ensuite le ticket.
+- Sinon (base verte, aucun job commun, jobs de la base illisibles), la boucle reste celle du § 7.6 : relance unique, puis contrôle de la base, puis `ci-fix`.
+- **Logs** : le log de chaque job en échec est lu une fois. Un extrait utile (erreurs et fin, sans le bruit) figure dans le résumé de la phase CI, lu par la rétro, et dans les commentaires de blocage CI (base cassée, plafond d'itérations), un bloc repliable par job.
+
+### Conséquences
+
+- **Positives** : une base cassée sur les mêmes jobs coûte un pipeline au lieu de deux ; le blocage et la rétro disent pourquoi les jobs échouent.
+- **Négatives** :
+  - un job instable qui échoue aussi sur la base n'est plus relancé : le ticket est bloqué alors qu'une relance aurait pu passer ;
+  - la comparaison se fait sur le nom du job : un job renommé entre la base et le ticket n'est pas reconnu ;
+  - un extrait de log (jusqu'à 1 500 caractères par job) est posté sur le ticket : un secret imprimé par un job y serait visible, comme dans le log du job lui-même.
+
+## Amendement 7 — Reprise sans CI verte, outils des sessions, recette de lancement, textes courts (2026-11-24)
+
+- **Statut** : accepté. Complète le § 7 (description de MR), le § 11 et le § 12.
+
+### Contexte
+
+Sur volunear#10, la CI de `main` était cassée : pour livrer quand même, l'utilisateur a modifié le fichier d'état à la main. Les sessions recevaient une cinquantaine d'outils intégrés (Workflow, RemoteTrigger, CronCreate, WebSearch…) que le garde-fou ne contrôle pas, soit environ 25 000 tokens de contexte fixe par session. Les reviews n'ont pas pu lancer l'application, et la session de captures a passé une vingtaine de tours à trouver comment le faire, savoir perdu en fin de session. Enfin, la description de MR faisait plusieurs écrans (critères avec la raison de chaque preuve, un paragraphe par test, hypothèses développées) et le commentaire de prise en charge 8 000 caractères. Un échec du setup postait 4 000 caractères de sortie brute sur une ligne.
+
+### Décision
+
+- **`run <projet>#<iid> --accept-ci`** : pour un ticket bloqué par la boucle CI (base cassée, plafond, pipeline annulé ou trop long, marqué `blockedByCi`) ou interrompu pendant la CI. Pas de nouvelle analyse : la boucle CI accepte le HEAD poussé sans attendre de pipeline, pour tout ce passage (y compris après un rebase), puis la livraison suit son cours. La MR porte « CI rouge acceptée manuellement » dans « À vérifier ». Un worktree supprimé depuis le blocage est recréé. Les commentaires de blocage CI donnent la commande. Refusé pour tout autre état.
+- **Outils des sessions** (§ 11) : liste blanche des outils intégrés, `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `ToolSearch` (chargement des outils MCP différés du navigateur). Les outils MCP de SprintSaver et la sortie structurée s'y ajoutent.
+- **Recette de lancement** : la session de captures rend le contenu à jour de la section « Captures d'écran » du skill projet quand elle a appris quelque chose. L'orchestrateur en tire `runs/<projet>-<iid>/launch-recipe.patch` (fichier créé depuis le gabarit s'il n'existe pas), que l'utilisateur relit et applique comme le patch de rétro.
+- **Description de MR**, lisible d'un coup d'œil :
+  ```
+  Closes #<iid>
+  <résumé : 2 à 4 puces d'une ligne, dont « À vérifier » si utile>
+  ## À vérifier          (CI acceptée, CI non exécutée, jobs instables ; absent sinon)
+  ## Captures / ## Changements d'API et de données (amendement 3, notes d'une phrase)
+  ## Critères : <prouvés>/<testables> prouvés
+  - [ ] <critère ouvert> — non prouvé : <raison> | à vérifier à la main : <raison>
+  <details> Critères prouvés : - [x] <critère> → `<test>` </details>
+  ## Tests
+  - `<fichier>` : N ajoutés, M modifiés
+  <details> Hypothèses </details>  <details> Nits restants </details>
+  ```
+  Les textes longs sont coupés (critère 140 caractères, raison 160, note 200) ; le détail reste dans le ticket, le diff et l'état.
+- **Commentaires** : prise en charge sur une ligne (type, critères testables, branche), résumé, critères non testables ; plan, hypothèses et précédents repliés. Livraison : lien de la MR et score de preuve, sans redire le résumé. Blocage : cause, détails, extrait de sortie ou de logs, puis une ligne branche · MR · relance.
+- **Échec d'une commande du projet** (setup) : cause courte (« setup du projet en échec (code 1) »), la commande, et un extrait utile de la sortie en bloc de code (sans le bruit des gestionnaires de paquets). L'extrait suit aussi le motif de blocage dans l'état, lu par `run`, `status` et la rétro.
+- **Skills de rédaction** : résumé de l'analyse en 2 ou 3 phrases sans valeurs internes, hypothèses d'une ligne, nits en une ou deux phrases, résumé de MR en puces.
+
+### Conséquences
+
+- **Positives** : livrer malgré une CI cassée ne demande plus d'éditer l'état ; les sessions ne voient que leurs outils ; la manière de lancer l'application s'accumule dans le skill projet ; la MR et les commentaires se lisent en quelques secondes.
+- **Négatives** :
+  - `--accept-ci` livre du code qu'aucun pipeline n'a validé : la mention dans la MR est le seul signal ;
+  - un outil intégré utile qui apparaîtrait dans une version future de Claude Code n'est pas offert tant qu'il n'est pas ajouté à la liste ;
+  - le relecteur doit ouvrir les blocs repliés pour voir les preuves détaillées et les hypothèses ;
+  - les patchs de recette, comme ceux de la rétro, restent à appliquer à la main.
 
 ## Hors périmètre v1 (reporté)
 

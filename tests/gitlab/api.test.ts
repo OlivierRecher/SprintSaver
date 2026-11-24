@@ -455,6 +455,17 @@ describe("pipelines", () => {
     expect((await api.latestFinishedPipeline(42, "main"))?.id).toBe(7);
   });
 
+  it("pipelineFailedJobs : jobs en échec d'un pipeline donné, hors allow_failure, pipelines aval nommés comme pour le ticket", async () => {
+    const job = (id: number, name: string, extra: Record<string, unknown> = {}) => ({ id, name, stage: "test", status: "failed", web_url: `j${id}`, allow_failure: false, ...extra });
+    const { api } = setup([
+      { path: "/projects/42/pipelines/7/jobs", respond: { json: [job(1, "db"), job(2, "lint", { allow_failure: true })] } },
+      { path: "/projects/42/pipelines/7/bridges", respond: { json: [job(50, "child", { downstream_pipeline: { id: 77, project_id: 42 } })] } },
+      { path: "/projects/42/pipelines/77/jobs", respond: { json: [job(3, "edge")] } },
+      { path: "/projects/42/pipelines/77/bridges", respond: { json: [] } },
+    ]);
+    expect((await api.pipelineFailedJobs(42, 7)).map((j) => j.name)).toEqual(["db", "child › edge"]);
+  });
+
   it("jobLog retire l'ANSI et garde la fin", async () => {
     const trace = "section_start:1:step\r\x1b[0K\x1b[32mhello\x1b[0m\r\nworld";
     const { api } = setup([{ path: "/projects/42/jobs/5/trace", respond: { text: trace } }]);
