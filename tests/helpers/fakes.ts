@@ -88,6 +88,7 @@ export const job = (name: string, id = 100): Job => ({
 });
 export const ciSuccess = (): PipelineOutcome => ({ kind: "success", pipeline: pipeline("success") });
 export const ciFailed = (jobs: Job[] = [job("unit")], id = 2): PipelineOutcome => ({ kind: "failed", pipeline: pipeline("failed", id), failedJobs: jobs });
+export const ciNoRunner = (id = 7): PipelineOutcome => ({ kind: "no-runner", pipeline: pipeline("pending", id) });
 export const basePipeline = (status: Pipeline["status"]): Pipeline => pipeline(status, 99);
 
 /** Journal partagé des appels, pour vérifier l'ordre entre GitLab, git et l'agent. */

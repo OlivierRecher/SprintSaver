@@ -80,6 +80,7 @@ Conséquence : on ne plafonne pas un budget en dollars. Les plafonds portent sur
    - s'il échoue encore, l'outil regarde le dernier pipeline de la branche par défaut. Si elle est rouge, il **coupe immédiatement** : statut *bloqué*, commentaire « CI de `<branche>` cassée, indépendante du ticket » ;
    - sinon, les logs des jobs en échec partent à la session `ci-fix`. Tout changement de code fait par la CI déclenche une passe de review sur le delta.
    - Il n'y a pas de vérification de la CI de la branche par défaut avant la prise en charge.
+   - Un pipeline **en attente faute de runner** (statut `pending`, tous ses jobs en attente marqués `stuck` par GitLab : aucun runner en ligne ne peut les prendre) n'est pas attendu jusqu'au plafond de temps : la phase CI est sautée, le commit est accepté comme pour un projet sans CI, et la MR porte une section « CI non exécutée » avec le lien du pipeline. Une CI verte sur un commit suivant retire la mention. Le pipeline n'est pas annulé : il partira si un runner revient.
 7. **Finalisation** :
    - rebase sur la branche par défaut ; en cas de conflit, résolution par l'agent puis nouvelle passe de tests, de review sur le delta et de CI ;
    - MR passée en **Ready** et assignée à l'utilisateur ;

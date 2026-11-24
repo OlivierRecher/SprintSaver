@@ -96,6 +96,8 @@ export type PipelineOutcome =
   | { kind: "failed"; pipeline: Pipeline; failedJobs: Job[] }
   | { kind: "canceled"; pipeline: Pipeline }
   | { kind: "none" } // aucun pipeline créé pour ce sha (pas de CI)
+  /** Pipeline en attente : aucun runner en ligne ne peut prendre ses jobs (tous `stuck`). */
+  | { kind: "no-runner"; pipeline: Pipeline }
   | { kind: "timeout"; pipeline?: Pipeline };
 
 export interface GitLabApi {
@@ -149,7 +151,8 @@ export interface GitLabApi {
 
   /**
    * Attend la fin du pipeline correspondant à `sha` (pipeline de MR si mrIid fourni et ciSource=merge_request,
-   * sinon pipeline de branche). Poll toutes les `pollMs`.
+   * sinon pipeline de branche). Poll toutes les `pollMs`. Rend `no-runner` sans attendre la fin si le pipeline
+   * est en attente et qu'aucun runner ne peut prendre ses jobs.
    */
   waitForPipeline(input: {
     project: ProjectConfig;
@@ -402,8 +405,10 @@ export interface TicketState {
   pickupCommented?: boolean;
   /** Un pipeline a déjà été observé pour ce ticket : un « aucun pipeline » ultérieur n'est plus « pas de CI ». */
   ciSeen?: boolean;
-  /** Dernier sha validé par la CI (vert, vert après relance, ou projet sans CI). */
+  /** Dernier sha validé par la CI (vert, vert après relance, projet sans CI, ou CI sautée faute de runner). */
   ciGreenSha?: string;
+  /** Pipeline de `ciGreenSha` resté en attente faute de runner : CI non exécutée (signalé dans la MR). */
+  ciNoRunnerPipelineUrl?: string;
   /** Temps de traitement actif cumulé (ms), hors périodes où l'outil était arrêté. Absent : 0. */
   activeMs?: number;
   /** Le worktree doit être recréé depuis le remote à la prochaine préparation (nouveau passage). */

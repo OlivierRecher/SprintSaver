@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ConfigSchema, ProjectConfigSchema, type ProjectConfig } from "../../src/config/schema.js";
 import { createGitLabApi, type GitLabApiImpl, type ProjectJob } from "../../src/gitlab/api.js";
 import { fakeFetch, type FakeRoute } from "../helpers/fake-fetch.js";
-import { SET_STATUS_MUTATION, WORK_ITEM_ID_QUERY } from "../../src/gitlab/graphql.js";
+import { PIPELINE_PENDING_JOBS_QUERY, SET_STATUS_MUTATION, WORK_ITEM_ID_QUERY } from "../../src/gitlab/graphql.js";
 
 const TOKEN = "glpat-SECRET";
 
@@ -340,6 +340,93 @@ describe("pipelines", () => {
     const to = await b.api.waitForPipeline({ project: project({ ciSource: "branch" }), sha: "abc", branch: "b", timeoutMs: 60_000, pollMs: 10_000 });
     expect(to.kind).toBe("timeout");
     if (to.kind === "timeout") expect(to.pipeline?.id).toBe(5);
+  });
+
+  /** Route GraphQL des jobs en attente : `stuck` de chaque job, ou erreur HTTP. */
+  const pendingJobs = (stuck: boolean[] | { status: number }): FakeRoute => ({
+    method: "POST",
+    path: "/api/graphql",
+    respond: (req) => {
+      expect((req.body as { query: string }).query).toBe(PIPELINE_PENDING_JOBS_QUERY);
+      return Array.isArray(stuck)
+        ? { json: { data: { project: { pipeline: { jobs: { nodes: stuck.map((s) => ({ stuck: s })) } } } } } }
+        : stuck;
+    },
+  });
+
+  it("pipeline en attente dont tous les jobs sont stuck → no-runner, sans attendre la fin", async () => {
+    const clock = { t: 0 };
+    const { api, calls } = setup(
+      [{ path: "/projects/42/pipelines", respond: { json: [pl(5, "pending")] } }, pendingJobs([true, true])],
+      clock,
+    );
+    const out = await api.waitForPipeline({ project: project({ ciSource: "branch" }), sha: "abc", branch: "b", timeoutMs: 3_600_000 });
+    expect(out).toEqual({ kind: "no-runner", pipeline: { id: 5, status: "pending", sha: "abc", ref: "b", webUrl: "p/5" } });
+    expect(clock.t).toBe(0);
+    const gql = calls.find((c) => c.path === "/api/graphql")!;
+    expect((gql.body as { variables: unknown }).variables).toEqual({ fullPath: "grp/app", id: "gid://gitlab/Ci::Pipeline/5" });
+  });
+
+  it("pipeline en attente avec un job pris en charge possible (non stuck) : on continue d'attendre", async () => {
+    const statuses = ["pending", "running", "success"];
+    const { api } = setup(
+      [
+        { path: "/projects/42/pipelines", respond: { json: [pl(5, "pending")] } },
+        { path: "/projects/42/pipelines/5", respond: () => ({ json: pl(5, statuses.shift() ?? "success") }) },
+        pendingJobs([true, false]),
+      ],
+      { t: 0 },
+    );
+    const out = await api.waitForPipeline({ project: project({ ciSource: "branch" }), sha: "abc", branch: "b", timeoutMs: 600_000, pollMs: 1000 });
+    expect(out.kind).toBe("success");
+  });
+
+  it("jobs en attente illisibles (GraphQL en erreur) : on continue d'attendre jusqu'au timeout", async () => {
+    const { api } = setup(
+      [
+        { path: "/projects/42/pipelines", respond: { json: [pl(5, "pending")] } },
+        { path: "/projects/42/pipelines/5", respond: { json: pl(5, "pending") } },
+        pendingJobs({ status: 403 }),
+      ],
+      { t: 0 },
+    );
+    const out = await api.waitForPipeline({ project: project({ ciSource: "branch" }), sha: "abc", branch: "b", timeoutMs: 60_000, pollMs: 10_000 });
+    expect(out.kind).toBe("timeout");
+  });
+
+  it("pipeline en cours (running) : jamais no-runner, même si des jobs sont stuck", async () => {
+    const statuses = ["running", "success"];
+    const { api, calls } = setup(
+      [
+        { path: "/projects/42/pipelines", respond: { json: [pl(5, "running")] } },
+        { path: "/projects/42/pipelines/5", respond: () => ({ json: pl(5, statuses.shift() ?? "success") }) },
+        pendingJobs([true]),
+      ],
+      { t: 0 },
+    );
+    const out = await api.waitForPipeline({ project: project({ ciSource: "branch" }), sha: "abc", branch: "b", timeoutMs: 600_000, pollMs: 1000 });
+    expect(out.kind).toBe("success");
+    expect(calls.some((c) => c.path === "/api/graphql")).toBe(false);
+  });
+
+  it("retryJobsAndWait : jobs relancés restés en attente faute de runner → no-runner", async () => {
+    const { api } = setup(
+      [
+        { method: "POST", path: "/projects/42/jobs/2/retry", respond: { json: { id: 20, name: "unit", stage: "test", status: "pending", web_url: "j20", allow_failure: false } } },
+        { path: "/projects/42/jobs/20", respond: { json: { id: 20, name: "unit", stage: "test", status: "pending", web_url: "j20", allow_failure: false } } },
+        { path: "/projects/42/pipelines/10", respond: { json: pl(10, "pending") } },
+        pendingJobs([true]),
+      ],
+      { t: 0 },
+    );
+    const out = await api.retryJobsAndWait({
+      project: project(),
+      pipeline: { id: 10, status: "failed", sha: "abc", ref: "b", webUrl: "" },
+      jobs: [{ id: 2, name: "unit", stage: "test", status: "failed", webUrl: "", allowFailure: false }],
+      timeoutMs: 600_000,
+      pollMs: 1000,
+    });
+    expect(out.kind).toBe("no-runner");
   });
 
   it("retryJobsAndWait relance chaque job puis attend le même pipeline", async () => {

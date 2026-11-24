@@ -22,7 +22,7 @@ import type {
   QueuedIssue,
 } from "../contracts.js";
 import { log } from "../log.js";
-import { setWorkItemStatus } from "./graphql.js";
+import { pipelineWaitsForRunner, setWorkItemStatus } from "./graphql.js";
 import { GitLabHttpError, GitLabRest, pid, type HttpDeps } from "./rest.js";
 import {
   extractImageUploads,
@@ -495,19 +495,25 @@ export class GitLabApiImpl implements GitLabApi {
     }
   }
 
-  /** Poll un pipeline connu jusqu'à statut final ou deadline. */
+  /** Pipeline en attente dont aucun job ne peut être pris par un runner (GraphQL `CiJob.stuck`). */
+  private async waitsForRunner(project: ProjectConfig, p: RawPipeline): Promise<boolean> {
+    return p.status === "pending" && (await pipelineWaitsForRunner(this.rest, project.path, p.id));
+  }
+
+  /** Poll un pipeline connu jusqu'à statut final, attente sans runner ou deadline. */
   private async pollPipeline(
-    projectId: number,
+    project: ProjectConfig,
     initial: RawPipeline,
     deadline: number,
     pollMs: number,
   ): Promise<PipelineOutcome> {
     let current = initial;
     for (;;) {
-      if (isFinalStatus(current.status)) return this.outcomeFor(projectId, current);
+      if (isFinalStatus(current.status)) return this.outcomeFor(project.id, current);
+      if (await this.waitsForRunner(project, current)) return { kind: "no-runner", pipeline: toPipeline(current) };
       if (this.rest.now() >= deadline) return { kind: "timeout", pipeline: toPipeline(current) };
       await this.rest.sleep(pollMs);
-      current = await this.rest.get<RawPipeline>(`/projects/${pid(projectId)}/pipelines/${current.id}`);
+      current = await this.rest.get<RawPipeline>(`/projects/${pid(project.id)}/pipelines/${current.id}`);
     }
   }
 
@@ -528,7 +534,7 @@ export class GitLabApiImpl implements GitLabApi {
     const parents = new Map<string, string[]>();
     for (;;) {
       const found = await this.findPipeline(input.project, input.sha, input.branch, input.mrIid, parents);
-      if (found) return this.pollPipeline(input.project.id, found, deadline, pollMs);
+      if (found) return this.pollPipeline(input.project, found, deadline, pollMs);
       const now = this.rest.now();
       if (now >= deadline) return { kind: "timeout" };
       if (now >= appearDeadline) {
@@ -540,7 +546,7 @@ export class GitLabApiImpl implements GitLabApi {
               { project: input.project.name, sha: input.sha, pipeline: branchPipeline.id },
               "Aucun pipeline de MR : pipeline de branche suivi à la place",
             );
-            return this.pollPipeline(input.project.id, branchPipeline, deadline, pollMs);
+            return this.pollPipeline(input.project, branchPipeline, deadline, pollMs);
           }
         }
         return { kind: "none" };
@@ -585,7 +591,7 @@ export class GitLabApiImpl implements GitLabApi {
     if (retried === 0) {
       // Rien n'a été relancé : l'état actuel est le bon.
       const current = await this.rest.get<RawPipeline>(pipelinePath);
-      return this.pollPipeline(projectId, current, deadline, pollMs);
+      return this.pollPipeline(input.project, current, deadline, pollMs);
     }
 
     let sawActive = false;
@@ -617,6 +623,8 @@ export class GitLabApiImpl implements GitLabApi {
           if (outcome.kind !== "failed" || outcome.failedJobs.length > 0) return outcome;
         }
       }
+      // Runner disparu depuis le premier passage : les jobs relancés ne partiront jamais.
+      if (await this.waitsForRunner(input.project, current)) return { kind: "no-runner", pipeline: toPipeline(current) };
       if (this.rest.now() >= deadline) return { kind: "timeout", pipeline: toPipeline(current) };
     }
   }

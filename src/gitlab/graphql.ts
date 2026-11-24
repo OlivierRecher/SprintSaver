@@ -44,6 +44,47 @@ query SprintSaverAllowedStatuses($fullPath: ID!) {
   }
 }`;
 
+/**
+ * Jobs en attente d'un pipeline et leur drapeau `stuck` : GitLab le lève quand aucun runner en ligne ne peut
+ * prendre le job (aucun runner, runners en pause ou tags sans correspondance). Vérifié le 2026-11-24 sur
+ * GitLab 19.6 : `Pipeline.jobs(statuses: [CiJobStatus!])`, `CiJob.stuck: Boolean`.
+ */
+export const PIPELINE_PENDING_JOBS_QUERY = `
+query SprintSaverPendingJobs($fullPath: ID!, $id: CiPipelineID!) {
+  project(fullPath: $fullPath) {
+    pipeline(id: $id) {
+      jobs(statuses: [PENDING]) {
+        nodes { stuck }
+      }
+    }
+  }
+}`;
+
+interface PendingJobsData {
+  project: { pipeline: { jobs: { nodes: { stuck: boolean | null }[] } | null } | null } | null;
+}
+
+/**
+ * Le pipeline attend faute de runner : il a des jobs en attente et tous sont `stuck`. En cas d'erreur, false
+ * (on continue d'attendre, comme avant).
+ */
+export async function pipelineWaitsForRunner(rest: GitLabRest, projectFullPath: string, pipelineId: number): Promise<boolean> {
+  try {
+    const data = await rest.graphql<PendingJobsData>(PIPELINE_PENDING_JOBS_QUERY, {
+      fullPath: projectFullPath,
+      id: `gid://gitlab/Ci::Pipeline/${pipelineId}`,
+    });
+    const pending = data.project?.pipeline?.jobs?.nodes ?? [];
+    return pending.length > 0 && pending.every((j) => j.stuck === true);
+  } catch (err) {
+    log.debug(
+      { err: err instanceof Error ? err.message : String(err), project: projectFullPath, pipelineId },
+      "Jobs en attente du pipeline illisibles",
+    );
+    return false;
+  }
+}
+
 export interface NativeStatus {
   id: string;
   name: string;

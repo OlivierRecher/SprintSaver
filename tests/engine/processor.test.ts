@@ -15,6 +15,7 @@ import {
   MemoryStore,
   basePipeline,
   ciFailed,
+  ciNoRunner,
   ciSuccess,
   job,
   makeConfig,
@@ -598,6 +599,51 @@ describe("CI et reprise (push avant attente, pipeline introuvable)", () => {
     const state = await h.run();
     expect(state.ciSeen).toBe(true);
     expect(state.ciGreenSha).toBe(h.git.head);
+  });
+
+  it("pipeline en attente faute de runner : CI sautée, livraison, signalée dans la MR", async () => {
+    const h = harness({ config: { retro: { enabled: false } } });
+    h.gitlab.pipelineOutcomes = [ciNoRunner(7)];
+    const state = await h.run();
+    expect(state.phase).toBe("finalized");
+    expect(state.ciGreenSha).toBe(h.git.head);
+    expect(state.ciNoRunnerPipelineUrl).toBe("https://gitlab.example.com/p/7");
+    expect(h.log.count("gitlab.retryJobsAndWait")).toBe(0);
+    expect(h.log.count("gitlab.latestFinishedPipeline")).toBe(0);
+    expect(h.agent.phases()).not.toContain("ci-fix");
+    const description = h.gitlab.mrUpdates.map((u) => u.patch.description).filter(Boolean).at(-1)!;
+    expect(description).toContain("## CI non exécutée");
+    expect(description).toContain("https://gitlab.example.com/p/7");
+  });
+
+  it("jobs relancés restés en attente faute de runner : CI sautée, sans ci-fix", async () => {
+    const h = harness({ config: { retro: { enabled: false } } });
+    h.gitlab.pipelineOutcomes = [ciFailed([job("e2e")])];
+    h.gitlab.retryOutcomes = [ciNoRunner(8)];
+    const state = await h.run();
+    expect(state.phase).toBe("finalized");
+    expect(state.ciNoRunnerPipelineUrl).toBe("https://gitlab.example.com/p/8");
+    expect(state.flakyJobs).toEqual([]);
+    expect(h.agent.phases()).not.toContain("ci-fix");
+  });
+
+  it("CI verte après une CI sautée faute de runner : la mention disparaît de la MR", async () => {
+    const saved = await stateAt("ci_green");
+    const h = harness({ config: { retro: { enabled: false } } });
+    await h.store.save({
+      ...saved,
+      mrIid: 5,
+      mrUrl: "https://mr/5",
+      ciSeen: true,
+      ciGreenSha: "ancien",
+      ciNoRunnerPipelineUrl: "https://gitlab.example.com/p/7",
+    });
+    h.git.head = "fixreview9";
+    const state = await h.run();
+    expect(state.phase).toBe("finalized");
+    expect(state.ciNoRunnerPipelineUrl).toBeUndefined();
+    const description = h.gitlab.mrUpdates.map((u) => u.patch.description).filter(Boolean).at(-1)!;
+    expect(description).not.toContain("CI non exécutée");
   });
 
   it("état arrivé à ci_green sans sha validé (correctif non poussé) : push et CI avant la livraison", async () => {

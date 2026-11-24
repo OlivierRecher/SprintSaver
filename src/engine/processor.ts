@@ -27,6 +27,7 @@ import {
   type GitOps,
   type Issue,
   type PhaseSummary,
+  type Pipeline,
   type PipelineOutcome,
   type RunRecorder,
   type StateStore,
@@ -319,6 +320,7 @@ class TicketRun {
       phaseBeforeBlock: _before,
       reviewedSha: _sha,
       ciGreenSha: _green,
+      ciNoRunnerPipelineUrl: _noRunner,
       pendingForcePush: _force,
       pendingRebaseReview: _rebase,
       proofsStale: _stale,
@@ -901,7 +903,12 @@ class TicketRun {
       iteration: this.nextIteration("ci"),
       startedAt: startedAt.toISOString(),
       durationMs: Date.now() - t0,
-      outcome: outcome.kind === "success" || outcome.kind === "none" ? "ok" : outcome.kind === "failed" ? "retry" : "blocked",
+      outcome:
+        outcome.kind === "success" || outcome.kind === "none" || outcome.kind === "no-runner"
+          ? "ok"
+          : outcome.kind === "failed"
+            ? "retry"
+            : "blocked",
       facts: [
         `${kind === "retry" ? "relance des jobs en échec" : "pipeline"} sur ${sha.slice(0, 8)} : ${outcome.kind}`,
         ...(failedJobs.length > 0 ? [shortFact(`jobs en échec : ${failedJobs.join(", ")}`, 400)] : []),
@@ -917,7 +924,8 @@ class TicketRun {
    * crash avant la fin de sa review, ou preuves périmées), puis pousse la branche : un correctif commité mais
    * pas poussé avant un crash l'est à la reprise, sinon on attendrait un pipeline sur un sha absent du remote. « Aucun pipeline » ne
    * vaut « pas de CI » que si aucun pipeline n'a jamais été vu pour ce ticket (`ciSeen`) ; sinon c'est un
-   * blocage.
+   * blocage. Un pipeline en attente faute de runner (`no-runner`) saute la CI : le sha est accepté et la MR le
+   * signale.
    */
   private async ciLoop(): Promise<void> {
     const { git, gitlab } = this.deps;
@@ -937,6 +945,7 @@ class TicketRun {
         await this.save();
       }
       if (outcome.kind === "success") return this.markCiGreen(sha);
+      if (outcome.kind === "no-runner") return this.skipCiNoRunner(sha, outcome.pipeline);
       if (outcome.kind === "none") {
         if (this.state.ciSeen) {
           throw new TicketBlocked({
@@ -967,6 +976,7 @@ class TicketRun {
           log.info({ ticket: this.key, jobs: names }, "Jobs instables : verts après relance");
           return this.markCiGreen(sha);
         }
+        if (retry.kind === "no-runner") return this.skipCiNoRunner(sha, retry.pipeline);
         if (retry.kind === "timeout" || retry.kind === "canceled") throw ciStopped(retry, this.limits.ciTimeoutMin);
         if (retry.kind === "failed") outcome = retry;
       }
@@ -1024,9 +1034,19 @@ class TicketRun {
     }
   }
 
-  private async markCiGreen(sha: string): Promise<void> {
+  private async markCiGreen(sha: string, noRunnerPipelineUrl?: string): Promise<void> {
     this.state.ciGreenSha = sha;
+    this.state.ciNoRunnerPipelineUrl = noRunnerPipelineUrl;
     await this.save();
+  }
+
+  /** Pipeline en attente faute de runner : la CI est sautée, le sha accepté tel quel. */
+  private async skipCiNoRunner(sha: string, pipeline: Pipeline): Promise<void> {
+    log.warn(
+      { ticket: this.key, sha: sha.slice(0, 8), pipeline: pipeline.webUrl },
+      "Pipeline en attente : aucun runner disponible, CI sautée",
+    );
+    return this.markCiGreen(sha, pipeline.webUrl);
   }
 
   /**
@@ -1508,6 +1528,7 @@ class TicketRun {
       assumptions: a?.assumptions ?? [],
       nits: st.nits,
       flakyJobs: st.flakyJobs,
+      ciNoRunnerPipelineUrl: st.ciNoRunnerPipelineUrl,
       captures: showcase?.captures,
       capturesMissing: showcase?.capturesMissing,
       dataChanges: showcase?.dataChanges,

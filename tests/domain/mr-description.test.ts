@@ -92,6 +92,14 @@ describe("renderMrDescription", () => {
     expect(md).not.toContain("## Hypothèses");
     expect(md).not.toContain("## Nits restants");
     expect(md).not.toContain("## Jobs CI instables");
+    expect(md).not.toContain("## CI non exécutée");
+  });
+
+  it("signale une CI non exécutée faute de runner, avec le lien du pipeline", () => {
+    const md = renderMrDescription(input({ ciNoRunnerPipelineUrl: "https://gitlab.example.com/g/p/-/pipelines/7" }));
+    expect(md).toContain(
+      "## CI non exécutée\nAucun runner n'était disponible : le [pipeline](https://gitlab.example.com/g/p/-/pipelines/7) est resté en attente et la CI n'a pas validé ce code.",
+    );
   });
 
   it("rend hypothèses, nits et jobs instables", () => {

@@ -33,6 +33,8 @@ export interface MrDescriptionInput {
   assumptions: string[];
   nits: Finding[];
   flakyJobs: string[];
+  /** Pipeline resté en attente faute de runner : la CI n'a pas tourné sur le code livré. */
+  ciNoRunnerPipelineUrl?: string;
   /** Captures avant/après des écrans modifiés (changement d'interface). */
   captures?: ScreenCapture[];
   /** Changement d'interface sans captures complètes : pourquoi (une ligne). */
@@ -75,6 +77,15 @@ export function renderMrDescription(input: MrDescriptionInput): string {
   const flaky = [...new Set(input.flakyJobs.map(oneLine).filter((j) => j !== ""))];
   if (flaky.length > 0) {
     blocks.push(section("Jobs CI instables", flaky.map((job) => `- ${codeSpan(job)} : passé à la 2ᵉ tentative`)));
+  }
+
+  const noRunner = oneLine(input.ciNoRunnerPipelineUrl ?? "");
+  if (noRunner !== "") {
+    blocks.push(
+      section("CI non exécutée", [
+        `Aucun runner n'était disponible : le [pipeline](${noRunner}) est resté en attente et la CI n'a pas validé ce code.`,
+      ]),
+    );
   }
 
   return blocks.join("\n\n") + "\n";
