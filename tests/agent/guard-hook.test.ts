@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { createGuardCallback, evaluateToolCall, parseShell, stripHeredocs } from "../../src/agent/guard-hook.js";
+import { createGuardCallback, evaluateToolCall, isLocalHost, parseShell, stripHeredocs } from "../../src/agent/guard-hook.js";
 
 const WT = "/Users/dev/.sprintsaver/worktrees/webapp-12";
 
@@ -253,5 +253,46 @@ describe("evaluateToolCall — liens symboliques et -t", () => {
     expect(b(`install -d ${outside}/x`)).toBe(false);
     expect(b("cp -t src lien-fichier")).toBe(true); // lire via un lien est permis
     expect(b("mv -t src src/a.ts")).toBe(true);
+  });
+});
+
+describe("evaluateToolCall — navigateur (Claude in Chrome)", () => {
+  const chrome = (tool: string, input: unknown) => evaluateToolCall(`mcp__claude-in-chrome__${tool}`, input, WT);
+
+  it("reconnaît les hôtes locaux", () => {
+    for (const h of ["localhost", "app.localhost", "127.0.0.1", "127.1.2.3", "[::1]", "0.0.0.0", "LOCALHOST."]) expect(isLocalHost(h)).toBe(true);
+    for (const h of ["gitlab.com", "localhost.evil.com", "127.0.0.1.nip.io", "10.0.0.1", "192.168.1.2"]) expect(isLocalHost(h)).toBe(false);
+  });
+
+  it("autorise la navigation vers l'application locale, avec ou sans protocole", () => {
+    for (const url of ["http://localhost:4801/panier", "https://127.0.0.1:3000", "localhost:4802/x?y=1", "http://[::1]:8080/", "back", "forward", "about:blank"]) {
+      expect(chrome("navigate", { url, tabId: 1 }).allow).toBe(true);
+    }
+  });
+
+  it("refuse toute autre destination, y compris par un schéma détourné", () => {
+    for (const url of ["https://gitlab.com/g/p/-/issues", "gitlab.com", "file:///etc/passwd", "javascript:alert(1)", "data:text/html,x", "http://localhost.evil.com", "chrome://settings"]) {
+      const d = chrome("navigate", { url, tabId: 1 });
+      expect(d.allow).toBe(false);
+    }
+    expect((chrome("navigate", { url: "gitlab.com" }) as { reason: string }).reason).toContain("localhost");
+  });
+
+  it("vérifie chaque action d'un browser_batch", () => {
+    const ok = { actions: [{ name: "navigate", input: { url: "http://localhost:4801", tabId: 1 } }, { name: "computer", input: { action: "screenshot", tabId: 1 } }] };
+    expect(chrome("browser_batch", ok).allow).toBe(true);
+    const bad = { actions: [{ name: "computer", input: { action: "wait", tabId: 1 } }, { name: "navigate", input: { url: "https://gitlab.com", tabId: 1 } }] };
+    expect(chrome("browser_batch", bad).allow).toBe(false);
+    const prefixed = { actions: [{ name: "mcp__claude-in-chrome__file_upload", input: { paths: ["/etc/hosts"], ref: "r", tabId: 1 } }] };
+    expect(chrome("browser_batch", prefixed).allow).toBe(false);
+  });
+
+  it("refuse l'envoi de fichiers et l'export GIF, laisse passer le reste", () => {
+    expect(chrome("file_upload", { paths: ["/Users/dev/.ssh/id_rsa"], ref: "r", tabId: 1 }).allow).toBe(false);
+    expect(chrome("upload_image", { imageId: "i", tabId: 1 }).allow).toBe(false);
+    expect(chrome("gif_creator", { action: "export", tabId: 1, download: true }).allow).toBe(false);
+    expect(chrome("computer", { action: "screenshot", tabId: 1, save_to_disk: true }).allow).toBe(true);
+    expect(chrome("tabs_create_mcp", {}).allow).toBe(true);
+    expect(chrome("read_console_messages", { tabId: 1 }).allow).toBe(true);
   });
 });

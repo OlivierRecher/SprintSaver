@@ -22,6 +22,7 @@ import type {
 } from "../../src/contracts.js";
 import { ConfigSchema, ProjectConfigSchema, type AgentPhase, type Config, type ProjectConfig } from "../../src/config/schema.js";
 import { parseCheckboxes } from "../../src/domain/checkboxes.js";
+import type { AgentProposal } from "../../src/agent/config-agent.js";
 
 export function makeProject(over: Partial<ProjectConfig> = {}): ProjectConfig {
   return ProjectConfigSchema.parse({
@@ -264,7 +265,7 @@ export class FakeGit implements GitOps {
     mkdirSync(wtPath, { recursive: true });
     return { reused };
   }
-  async prepareWorktree() {
+  async prepareWorktree(_p: ProjectConfig, _wtPath: string, _timeoutMs: number) {
     this.log.push("git.prepareWorktree");
   }
   async removeWorktree(_p: ProjectConfig, wtPath: string) {
@@ -278,6 +279,13 @@ export class FakeGit implements GitOps {
     this.log.push("git.createBaseWorktree");
     this.baseWorktrees.push(basePath);
     mkdirSync(basePath, { recursive: true });
+  }
+  /** Worktrees détachés sur la branche par défaut créés (chemins). */
+  detachedWorktrees: string[] = [];
+  async createDetachedWorktree(_p: ProjectConfig, wtPath: string) {
+    this.log.push("git.createDetachedWorktree");
+    this.detachedWorktrees.push(wtPath);
+    mkdirSync(wtPath, { recursive: true });
   }
   async discardChanges() {
     this.log.push("git.discardChanges");
@@ -500,3 +508,28 @@ export class MemoryRecorder implements RunRecorder {
     return this.summaries.filter((s) => s.ticketKey === key);
   }
 }
+
+/** Sortie type de l'agent de configuration (init). */
+export const makeAgentProposal = (over: Partial<AgentProposal> = {}): AgentProposal => ({
+  name: "shop",
+  localCheckout: "",
+  stack: "Python 3.10 / unittest",
+  setupCommand: "uv venv --python 3.10 .venv",
+  buildCommand: "",
+  testCommand: ".venv/bin/python -m unittest discover -s tests",
+  testMode: "local",
+  ciSource: "merge_request",
+  worktreeInclude: [],
+  cowDirs: [],
+  status: {
+    inProgress: { kind: "native", name: "In progress", id: "gid://s/2" },
+    inReview: { kind: "label", name: "sprintsaver::en-review", id: "" },
+    blocked: { kind: "label", name: "sprintsaver::bloque", id: "" },
+  },
+  typeLabels: { bug: ["bug"], feature: ["feature"] },
+  toolchain: [{ tool: "python", required: "3.10", source: ".python-version, image python:3.10", available: "défaut 3.15 ; uv 3.10.22", pinnedBy: "uv venv --python 3.10" }],
+  prerequisites: [],
+  verification: { status: "passed", failingTests: [], note: "setup et tests passent" },
+  explanation: "La CI et .python-version exigent Python 3.10.",
+  ...over,
+});

@@ -89,3 +89,24 @@ describe("buildSkillContext", () => {
     ).rejects.toThrow(/Skill de phase introuvable pour "review"/);
   });
 });
+
+describe("buildSkillContext — navigateur (Claude in Chrome)", () => {
+  it("ajoute le skill tools/chrome juste après le skill de phase quand la session a le navigateur", async () => {
+    await put(join(skills, "tools", "chrome", "SKILL.md"), "---\nname: chrome\n---\nHôte local uniquement.");
+    const ctx = await buildSkillContext({ phase: "analyse", ticketType: "bug", project, worktreePath: wt, skillsRoot: skills, browser: true });
+    expect(ctx.loaded).toEqual(["phases/analyse", "tools/chrome", "types/bug"]);
+    expect(ctx.text).toContain("Hôte local uniquement.");
+    const without = await buildSkillContext({ phase: "analyse", ticketType: "bug", project, worktreePath: wt, skillsRoot: skills });
+    expect(without.loaded).not.toContain("tools/chrome");
+  });
+  it("skill du navigateur absent : erreur explicite", async () => {
+    await expect(
+      buildSkillContext({ phase: "mr-writeup", ticketType: "bug", project, worktreePath: wt, skillsRoot: skills, browser: true }),
+    ).rejects.toThrow(/navigateur introuvable/);
+  });
+  it("le skill livré dans le dépôt existe", async () => {
+    const ctx = await buildSkillContext({ phase: "review", ticketType: "feature", project, worktreePath: wt, browser: true });
+    expect(ctx.loaded.slice(0, 2)).toEqual(["phases/review", "tools/chrome"]);
+    expect(ctx.text).toContain("save_to_disk");
+  });
+});

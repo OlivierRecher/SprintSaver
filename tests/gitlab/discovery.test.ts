@@ -7,6 +7,8 @@ import {
   detectStacks,
   checkProjectAccess,
   findUserByUsername,
+  getCiConfig,
+  getProject,
   getUserDetails,
   guessForRole,
   InvalidTokenError,
@@ -301,5 +303,30 @@ describe("findUserByUsername : recherche refusée par l'instance", () => {
   it.each([403, 404])("GET /users %i → UserLookupUnavailableError", async (status) => {
     const { rest: r } = rest([{ path: "/users", respond: { status, json: {} } }]);
     await expect(findUserByUsername(r, "olivier.recher")).rejects.toBeInstanceOf(UserLookupUnavailableError);
+  });
+});
+
+describe("config CI et projet par chemin (init, ADR amendement 5)", () => {
+  it("getCiConfig : config fusionnée de l'API de validation, includes développés", async () => {
+    const { rest: r, calls } = rest([{ path: "/projects/7/ci/lint", respond: { json: { valid: true, merged_yaml: "test:\n  image: node:20\n" } } }]);
+    expect(await getCiConfig(r, 7, "main")).toEqual({ source: "merged", yaml: "test:\n  image: node:20\n" });
+    expect(calls[0]!.query.get("content_ref")).toBe("main");
+  });
+
+  it("getCiConfig : repli sur le .gitlab-ci.yml brut si la validation est refusée, « none » sans CI", async () => {
+    const { rest: r } = rest([
+      { path: "/projects/7/ci/lint", respond: { status: 403, json: {} } },
+      { path: "/projects/7/repository/files/.gitlab-ci.yml/raw", respond: { text: "include: x.yml\n" } },
+    ]);
+    expect(await getCiConfig(r, 7, "main")).toEqual({ source: "raw", yaml: "include: x.yml\n" });
+    const { rest: none } = rest([{ path: "/projects/7/ci/lint", respond: { json: { valid: false, merged_yaml: null } } }]);
+    expect(await getCiConfig(none, 7, "main")).toEqual({ source: "none", yaml: "" });
+  });
+
+  it("getProject : par chemin encodé ou par id", async () => {
+    const p = { id: 7, name: "shop", path_with_namespace: "team/shop", http_url_to_repo: "https://g/team/shop.git", web_url: "https://g/team/shop", default_branch: null };
+    const { rest: r, calls } = rest([{ path: "/projects/team/shop", respond: { json: p } }]);
+    expect(await getProject(r, "team/shop")).toEqual({ id: 7, name: "shop", pathWithNamespace: "team/shop", httpUrl: "https://g/team/shop.git", webUrl: "https://g/team/shop", defaultBranch: "main" });
+    expect(calls[0]!.path).toBe("/projects/team%2Fshop");
   });
 });

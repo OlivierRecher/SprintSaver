@@ -119,6 +119,26 @@ export async function listMemberProjects(rest: GitLabRest): Promise<ProjectInfo[
   }));
 }
 
+/** Un projet par id ou par chemin (`groupe/projet`). */
+export async function getProject(rest: GitLabRest, idOrPath: number | string): Promise<ProjectInfo> {
+  const p = await rest.get<{
+    id: number;
+    name: string;
+    path_with_namespace: string;
+    http_url_to_repo: string;
+    web_url: string;
+    default_branch?: string | null;
+  }>(`/projects/${pid(idOrPath)}`);
+  return {
+    id: p.id,
+    name: p.name,
+    pathWithNamespace: p.path_with_namespace,
+    httpUrl: p.http_url_to_repo,
+    webUrl: p.web_url,
+    defaultBranch: p.default_branch || "main",
+  };
+}
+
 export interface LabelInfo {
   name: string;
   color: string;
@@ -174,6 +194,33 @@ export async function readRepoFile(
     if (err instanceof GitLabHttpError && err.status === 404) return null;
     throw err;
   }
+}
+
+export interface CiConfig {
+  /**
+   * `merged` : config complète, includes développés (`GET /projects/:id/ci/lint`) ; `raw` : `.gitlab-ci.yml` seul
+   * (includes non développés) ; `none` : pas de CI.
+   */
+  source: "merged" | "raw" | "none";
+  yaml: string;
+}
+
+/**
+ * Config CI de la branche `ref`, en lecture seule. On essaie d'abord la config fusionnée renvoyée par l'API de
+ * validation (includes développés, rôle Developer requis), sinon le `.gitlab-ci.yml` brut.
+ */
+export async function getCiConfig(rest: GitLabRest, projectId: number, ref: string): Promise<CiConfig> {
+  try {
+    const lint = await rest.get<{ valid?: boolean; merged_yaml?: string | null }>(`/projects/${pid(projectId)}/ci/lint`, {
+      content_ref: ref,
+    });
+    if (typeof lint.merged_yaml === "string" && lint.merged_yaml.trim()) return { source: "merged", yaml: lint.merged_yaml };
+  } catch (err) {
+    if (!(err instanceof GitLabHttpError)) throw err;
+    log.debug({ projectId, status: err.status }, "config CI fusionnée indisponible, lecture du fichier brut");
+  }
+  const raw = await readRepoFile(rest, projectId, ".gitlab-ci.yml", ref);
+  return raw === null ? { source: "none", yaml: "" } : { source: "raw", yaml: raw };
 }
 
 // ---------------------------------------------------------------------------

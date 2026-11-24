@@ -278,6 +278,41 @@ describe("worktrees", () => {
   });
 });
 
+describe("environnement des commandes du projet", () => {
+  it("run : sans les variables d'un script npm, mais avec CI=true et l'environnement de l'utilisateur", async () => {
+    const keys = ["npm_config_prefix", "npm_lifecycle_event", "INIT_CWD", "SS_USER_VAR"] as const;
+    const before = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    Object.assign(process.env, { npm_config_prefix: "/opt/homebrew", npm_lifecycle_event: "dev", INIT_CWD: "/x", SS_USER_VAR: "garde" });
+    try {
+      const res = await ops.run(root, 'echo "prefix=${npm_config_prefix:-absent} init=${INIT_CWD:-absent} ci=$CI user=$SS_USER_VAR"', 10_000);
+      expect(res.output.trim()).toBe("prefix=absent init=absent ci=true user=garde");
+    } finally {
+      for (const k of keys) {
+        if (before[k] === undefined) delete process.env[k];
+        else process.env[k] = before[k];
+      }
+    }
+  });
+});
+
+describe("worktree détaché sur la branche par défaut (init)", () => {
+  it("createDetachedWorktree : HEAD sur origin/<défaut>, recréé s'il existe, supprimé par removeWorktree", async () => {
+    const p = project();
+    const repo = await ops.ensureReferenceClone(p);
+    const head = (await g(repo, "rev-parse", "origin/main")).trim();
+    const wt = paths.worktree(`init-${p.name}`);
+    await ops.createDetachedWorktree(p, wt);
+    expect((await g(wt, "rev-parse", "HEAD")).trim()).toBe(head);
+    expect((await g(wt, "symbolic-ref", "-q", "HEAD").catch(() => "détaché")).trim()).toBe("détaché");
+    await writeFile(join(wt, "reste.txt"), "x");
+    await ops.createDetachedWorktree(p, wt);
+    expect(existsSync(join(wt, "reste.txt"))).toBe(false);
+    await ops.removeWorktree(p, wt);
+    expect(existsSync(wt)).toBe(false);
+    expect(await g(repo, "worktree", "list", "--porcelain")).not.toContain(wt);
+  });
+});
+
 describe("commit, push, diff", () => {
   it("commit à l'identité configurée, sans trailer, puis push et force-push", async () => {
     const p = project();

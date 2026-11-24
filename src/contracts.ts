@@ -213,6 +213,11 @@ export interface GitOps {
    * (l'état « avant » du ticket). Un dossier existant à cet endroit est d'abord supprimé.
    */
   createBaseWorktree(project: ProjectConfig, wtPath: string, basePath: string): Promise<void>;
+  /**
+   * Crée `wtPath`, worktree détaché sur origin/<defaultBranch> tel que fetché par `ensureReferenceClone`
+   * (analyse et vérification des commandes par `init`). Un dossier existant à cet endroit est d'abord supprimé.
+   */
+  createDetachedWorktree(project: ProjectConfig, wtPath: string): Promise<void>;
   /** Annule les modifications non commitées (fichiers suivis restaurés, non suivis non ignorés supprimés). */
   discardChanges(wtPath: string): Promise<void>;
 

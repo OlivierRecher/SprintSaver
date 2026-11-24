@@ -5,6 +5,7 @@
  * - `settingSources: []`, `strictMcpConfig` : rien d'implicite ne s'ajoute à la session ;
  * - `bypassPermissions` + garde-fou PreToolUse ;
  * - GitLab en lecture seule via MCP in-process ;
+ * - Claude in Chrome (`--chrome`) pour les phases de `config.chrome.phases`, `--no-chrome` ailleurs (ADR, amendement 4) ;
  * - sortie structurée (`outputFormat: json_schema`) revalidée par zod, avec une relance sur la même session ;
  * - transcript JSONL optionnel dans `runs/<ticket>/<phase>-<iteration>.jsonl` (ouvert en ajout : une session
  *   reprise après une interruption s'ajoute à la précédente, après une ligne de séparation) ;
@@ -26,7 +27,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { AgentRunError, type AgentRunner, type AgentRunRequest, type AgentRunResult, type GitLabApi } from "../contracts.js";
-import { modelFor, type AgentPhase, type Config } from "../config/schema.js";
+import { chromeFor, modelFor, type AgentPhase, type Config } from "../config/schema.js";
 import { paths } from "../config/paths.js";
 import { log } from "../log.js";
 import { resolveClaudeExecutable } from "./claude-path.js";
@@ -34,6 +35,7 @@ import { createGitLabReadServer, GITLAB_MCP_SERVER_NAME } from "./gitlab-tools.j
 import { createGuardHooks } from "./guard-hook.js";
 import { buildSkillContext } from "./skills.js";
 import { trackProcessGroup } from "../process-groups.js";
+import { projectCommandEnv } from "../process-env.js";
 
 /** Signature minimale de `query()` utilisée par le runner (injectable pour les tests). */
 export type QueryFn = (params: { prompt: string; options?: Options }) => AsyncIterable<SDKMessage>;
@@ -67,9 +69,12 @@ Tu es une phase d'un pipeline automatisé (SprintSaver) qui traite un ticket Git
 - Un garde-fou refuse les commandes interdites : si un appel est refusé, lis la raison et adapte-toi, ne cherche pas à le contourner.
 - Termine en produisant la sortie structurée demandée, conforme au schéma JSON fourni. L'orchestrateur ne lit que cette sortie.`;
 
-/** Environnement de la session : celui du processus, sans clé API (auth via le login Claude Code, ADR § 2). */
+/**
+ * Environnement de la session : celui des commandes du projet (sans les traces du gestionnaire de paquets qui a
+ * lancé SprintSaver, voir process-env.ts), sans clé API (auth via le login Claude Code, ADR § 2).
+ */
 export function sessionEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...base, CLAUDE_AGENT_SDK_CLIENT_APP: "sprintsaver/0.1.0" };
+  const env: Record<string, string | undefined> = { ...projectCommandEnv(base), CLAUDE_AGENT_SDK_CLIENT_APP: "sprintsaver/0.1.0" };
   delete env.ANTHROPIC_API_KEY;
   return env;
 }
@@ -232,6 +237,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
   }
 
   async function run<T>(req: AgentRunRequest<T>): Promise<AgentRunResult<T>> {
+    const browser = chromeFor(config, req.phase);
     const skills = await buildSkillContext({
       phase: req.phase,
       ticketType: req.ticketType,
@@ -239,6 +245,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       project: req.project,
       worktreePath: req.worktreePath,
       skillsRoot: deps.skillsRoot,
+      browser,
     });
     log.debug({ phase: req.phase, ticket: req.ticketKey, skills: skills.loaded }, "skills chargés");
 
@@ -281,6 +288,8 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       outputFormat: { type: "json_schema", schema: toOutputJsonSchema(req.outputSchema) },
       maxTurns: config.limits.maxTurnsPerSession,
       env: sessionEnv(),
+      // Explicite dans les deux sens : un réglage personnel de Claude Code ne doit pas l'activer en douce.
+      extraArgs: browser ? { chrome: null } : { "no-chrome": null },
     };
 
     const transcriptPath = config.transcripts.enabled ? transcriptFile(req.ticketKey, req.phase, req.iteration) : undefined;

@@ -9,6 +9,7 @@ import { paths } from "../config/paths.js";
 import type { CommandResult, GitOps, RebaseResult } from "../contracts.js";
 import { log } from "../log.js";
 import { killProcessGroup, trackProcessGroup } from "../process-groups.js";
+import { projectCommandEnv } from "../process-env.js";
 
 /** Taille max de la sortie conservée par `run` (fin de la sortie). */
 const MAX_OUTPUT_CHARS = 30_000;
@@ -357,6 +358,16 @@ export function createGitOps(opts: GitOpsOptions): GitOps {
     await ensureToolDirExcluded(basePath);
   }
 
+  async function createDetachedWorktree(project: ProjectConfig, wtPath: string): Promise<void> {
+    const repo = paths.repo(project.name);
+    if (!(await exists(repo))) await ensureReferenceClone(project);
+    if (await exists(wtPath)) await removeWorktree(project, wtPath);
+    await git(["worktree", "prune"], { cwd: repo });
+    await mkdir(dirname(wtPath), { recursive: true });
+    await git(["worktree", "add", "--detach", wtPath, `origin/${project.defaultBranch}`], { cwd: repo });
+    await ensureToolDirExcluded(wtPath);
+  }
+
   async function discardChanges(wtPath: string): Promise<void> {
     await git(["reset", "--hard", "-q", "HEAD"], { cwd: wtPath });
     // Sans -x : les fichiers ignorés (.sprintsaver/, dépendances, .env copiés) restent.
@@ -491,6 +502,7 @@ export function createGitOps(opts: GitOpsOptions): GitOps {
     prepareWorktree,
     removeWorktree,
     createBaseWorktree,
+    createDetachedWorktree,
     discardChanges,
     commitAll,
     push,
@@ -525,7 +537,9 @@ export async function run(wtPath: string, command: string, timeoutMs: number): P
     detached: process.platform !== "win32",
     cleanup: true,
     stdin: "ignore",
-    env: { CI: "true" },
+    // Même environnement qu'à la vérification de `init` : sans les traces du gestionnaire de paquets qui a lancé SprintSaver.
+    extendEnv: false,
+    env: { ...projectCommandEnv(), CI: "true" },
   });
   const pid = sub.pid;
   // Groupe tué si SprintSaver quitte avant la fin de la commande (cf. process-groups.ts).

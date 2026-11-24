@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkGitLabConnection, parseGitVersion } from "../../src/cli/doctor.js";
+import { checkClaudeInChrome, checkGitLabConnection, chromeNativeHostDirs, parseGitVersion } from "../../src/cli/doctor.js";
 import { GlabAuthError, staticToken, type TokenProvider } from "../../src/gitlab/glab-auth.js";
 import { ConfigSchema } from "../../src/config/schema.js";
 import { createGitLabRest } from "../../src/gitlab/rest.js";
@@ -79,5 +79,26 @@ describe("checkGitLabConnection (ADR, amendements 1 et 2)", () => {
       level: "warn",
       msg: "glab est connecté en tant que bob (id 9), différent de la config (olivier, id 5)",
     });
+  });
+});
+
+describe("checkClaudeInChrome (ADR, amendement 4)", () => {
+  const cfg = (chrome: Record<string, unknown> = {}) => ConfigSchema.parse({ gitlab: { username: "o", userId: 1 }, chrome });
+  const HOME = "/Users/dev";
+  const manifest = `${chromeNativeHostDirs(HOME)[0]}/com.anthropic.claude_code_browser_extension.json`;
+
+  it("extension reliée : ok, avec les phases concernées", () => {
+    const line = checkClaudeInChrome(cfg(), HOME, (p) => p === manifest);
+    expect(line.level).toBe("ok");
+    expect(line.msg).toContain("ui-captures, review");
+  });
+  it("extension absente : avertissement, pas un échec", () => {
+    const line = checkClaudeInChrome(cfg(), HOME, () => false);
+    expect(line.level).toBe("warn");
+    expect(line.msg).toContain("claude --chrome");
+  });
+  it("désactivé : rien à vérifier", () => {
+    expect(checkClaudeInChrome(cfg({ enabled: false }), HOME, () => false)).toEqual({ level: "ok", msg: "Claude in Chrome désactivé (chrome.enabled)" });
+    expect(checkClaudeInChrome(cfg({ phases: [] }), HOME, () => false).level).toBe("ok");
   });
 });

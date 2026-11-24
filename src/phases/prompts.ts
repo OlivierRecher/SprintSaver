@@ -578,7 +578,7 @@ export function buildUiCapturesPrompt(input: {
     "",
     `- APRÈS : le répertoire courant (worktree du ticket).`,
     `- AVANT : ${input.basePath} (même dépôt, sur la base du ticket, dépendances et fichiers locaux préparés). Tu peux y écrire (build, cache).`,
-    `- Écris chaque capture en PNG dans \`${input.capturesDir}/\` du répertoire courant, nommée \`<n>-avant.png\` et \`<n>-apres.png\`.`,
+    `- Écris chaque capture en PNG ou JPEG dans \`${input.capturesDir}/\` du répertoire courant, nommée \`<n>-avant.<ext>\` et \`<n>-apres.<ext>\` (\`.png\` ou \`.jpg\`).`,
     "- Même viewport, mêmes données et même parcours pour l'avant et l'après : seule la version du code doit différer.",
     "- Arrête tous les serveurs que tu as lancés avant de terminer.",
     "",

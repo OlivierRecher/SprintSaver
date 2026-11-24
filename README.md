@@ -46,13 +46,18 @@ glab peut être connecté de deux façons :
 npm install
 npm run build
 npm link          # rend la commande `sprintsaver` disponible
-sprintsaver init  # connexion GitLab, choix des projets, détections, mapping des statuts
+sprintsaver init  # connexion GitLab, choix des projets, config proposée et vérifiée par l'agent
 sprintsaver doctor --smoke
 ```
 
-Pour chaque projet, `init` :
-- **fait analyser le dépôt par Claude** : une session Sonnet en lecture seule, qui ne peut rien exécuter ni modifier et prend environ une minute pour quelques centimes. Elle lit les manifestes, la CI et le README, puis propose les commandes de setup, build et test, le mode de test, les dossiers de dépendances et les fichiers à copier. Tu valides ou corriges chaque proposition. Si l'analyse échoue, une détection simple prend le relais.
-- **mappe les trois statuts** (en cours, livré en review, bloqué), chacun sur un statut natif GitLab ou sur un label. Si aucun ne convient, il propose de créer le label (`sprintsaver::en-cours`, `sprintsaver::en-review`, `sprintsaver::bloque`). Il propose de même de créer les labels `bug` et `feature` s'ils manquent, ainsi que `auto::ready`.
+Pour chaque projet, `init` lance un **agent de configuration** (ADR, amendement 5) qui propose toute la config du projet, en quelques minutes :
+- **commandes de setup, build et test qui marchent sur ta machine** : un sous-agent relève les versions de toolchain exigées par le dépôt (CI, Dockerfile, `.nvmrc`, `.python-version`, `global.json`, manifestes, README…), les compare à ce que ta machine fournit, et écrit des commandes qui fixent la version au lieu de dépendre du runtime par défaut du PATH (de préférence avec un gestionnaire de versions déjà installé : mise, fnm, volta, nvm, pyenv, uv, sdkman…). Ce qui manque est listé en **prérequis**. SprintSaver **exécute réellement** ces commandes dans un worktree jetable de la branche par défaut (trois tentatives au plus) et distingue une commande cassée de tests déjà rouges sur la branche par défaut. Rien n'est installé globalement ;
+- **checkout local** (d'où copier `.env` et dépendances), mode de test, pipeline surveillé, dossiers de dépendances, et **fichiers ignorés à copier** : ceux qu'il faut pour lancer les tests et l'application en local (config d'environnement, secrets de dev). L'agent n'en voit que les noms, jamais le contenu, et propose d'office le pendant d'un fichier d'exemple versionné (`.env` pour `.env.example`) ;
+- **les trois statuts** (en cours, livré en review, bloqué), chacun sur un statut natif GitLab ou sur un label (`sprintsaver::en-cours`, `sprintsaver::en-review`, `sprintsaver::bloque` à créer si rien ne convient), et les labels `bug` et `feature`.
+
+`init` affiche la proposition complète, avec le résultat de la vérification réelle et les prérequis. Tu valides, modifies un champ, relances la vérification ou annules. Les labels manquants (et `auto::ready`) ne sont créés, et la config écrite, qu'après validation. Les agents n'ont que la lecture du dépôt : ils n'exécutent rien eux-mêmes et n'écrivent jamais sur GitLab. Si l'agent échoue, la détection simple et les questions champ par champ prennent le relais (`--no-agent` pour le forcer).
+
+Sans question : `sprintsaver init --yes --project groupe/projet` accepte les propositions. `--dry-run` n'écrit rien sur GitLab ni dans la config et affiche la config produite (ou l'écrit dans `--output <fichier>`). Voir `sprintsaver init --help`. Relance `init` sur un projet quand ton environnement change (mise à jour d'un runtime, nouveau gestionnaire de versions) : ses commandes sont revérifiées.
 
 La config est écrite dans `~/.sprintsaver/config.yaml`, sans aucun jeton. Elle reste modifiable à la main.
 

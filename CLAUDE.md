@@ -13,10 +13,12 @@ SprintSaver est un CLI TypeScript qui prend en charge les tickets GitLab `auto::
 - `src/contracts.ts` : interfaces entre modules (GitLabApi, GitOps, AgentRunner, StateStore, TicketState). Le moteur ne dépend que de ces interfaces.
 - `src/engine/processor.ts` : machine à états d'un ticket (phases, boucles, blocage, rétro).
 - `src/phases/schemas.ts` : sorties structurées des sessions. `src/phases/prompts.ts` construit les prompts et le contexte.
-- `src/agent/` : `runner.ts` (wrapper du Claude Agent SDK), `skills.ts` (sélection déterministe), `guard-hook.ts` (garde-fou PreToolUse), `gitlab-tools.ts` (MCP GitLab en lecture seule).
+- `src/agent/` : `runner.ts` (wrapper du Claude Agent SDK), `skills.ts` (sélection déterministe), `guard-hook.ts` (garde-fou PreToolUse), `gitlab-tools.ts` (MCP GitLab en lecture seule). Pour `init` (ADR amendement 5) : `config-agent.ts` (agent de configuration, sortie structurée), `detect-commands.ts` (sous-agent des commandes et des versions de toolchain), `config-tools.ts` (outils MCP de l'agent, dont `verify_commands`).
+- `src/init/` : partie déterministe de `init` autour de l'agent. `verify.ts` (exécution réelle des commandes dans un worktree jetable, politique d'exécution, extrait de sortie), `toolchains.ts` (sondes de version en lecture seule), `local-checkout.ts` (recherche bornée d'un checkout local, noms de ses fichiers ignorés), `proposal.ts` (normalisation, labels à créer, rendu de la proposition). `src/cli/init.ts` : questions, validation, `--yes`, `--dry-run` et écritures.
 - `src/gitlab/` : client REST/GraphQL fait maison ; `glab-auth.ts` lit le jeton de la connexion glab (aucun jeton stocké par SprintSaver, ADR amendement 2). `src/git/gitops.ts` : clones, worktrees, commits, rebase. `src/state/` : état JSON, runs, verrou.
+- `src/process-env.ts` : environnement de toutes les commandes du projet (tickets, vérification d'`init`, sondes, sessions agent), sans les traces du gestionnaire de paquets qui a lancé SprintSaver.
 - `src/domain/` : cases à cocher, description de MR, commentaires (textes en français).
-- `skills/` : skills injectés dans les sessions (phases, types, projets).
+- `skills/` : skills injectés dans les sessions (phases, types, projets, et `tools/chrome` pour les phases qui pilotent Chrome, ADR amendement 4).
 - `tests/` : tests vitest, même arborescence que `src/` (`tests/engine/processor.test.ts` teste `src/engine/processor.ts`). Doubles en mémoire et faux `fetch` dans `tests/helpers/`. Aucun test ni double dans `src/`.
 
 ## Règles

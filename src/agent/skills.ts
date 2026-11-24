@@ -1,7 +1,8 @@
 /**
  * Sélection déterministe des skills injectés dans le prompt système d'une session (ADR § 9).
  *
- * Ordre : phase (obligatoire) → type de ticket (phases d'ingénierie) → projet → conventions du dépôt cible.
+ * Ordre : phase (obligatoire) → outil navigateur (phases qui pilotent Chrome) → type de ticket (phases
+ * d'ingénierie) → projet → conventions du dépôt cible.
  * Aucune trace d'un ticket passé n'est injectée ici (ADR § 10).
  */
 import { readFile } from "node:fs/promises";
@@ -26,6 +27,8 @@ export interface SkillContextInput {
   project: ProjectConfig;
   worktreePath: string;
   skillsRoot?: string;
+  /** La session pilote Chrome (Claude in Chrome) : ajoute le skill `tools/chrome`. */
+  browser?: boolean;
 }
 
 export interface SkillContext {
@@ -64,6 +67,15 @@ export async function buildSkillContext(input: SkillContextInput): Promise<Skill
   }
   blocks.push(`# Skill de phase : ${input.phase}\n\n${stripFrontmatter(phaseContent)}`);
   loaded.push(`phases/${input.phase}`);
+
+  // 1 bis. Mode d'emploi du navigateur, quand la session a les outils Claude in Chrome.
+  if (input.browser) {
+    const chromePath = join(root, "tools", "chrome", "SKILL.md");
+    const chromeContent = await readIfExists(chromePath);
+    if (chromeContent === null) throw new Error(`Skill du navigateur introuvable : ${chromePath}`);
+    blocks.push(`# Skill d'outil : navigateur (Claude in Chrome)\n\n${stripFrontmatter(chromeContent)}`);
+    loaded.push("tools/chrome");
+  }
 
   // 2. Skill de type, pour les phases d'ingénierie.
   // Type pas encore tranché (analyse sans label) : les deux skills, pour profiter aussi de la recherche

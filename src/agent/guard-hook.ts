@@ -5,7 +5,11 @@
  * - sur `Bash` : toute commande git qui touche au réseau ou au remote, `git -C <ailleurs>`, `git commit`
  *   et `git rebase` dans le worktree (c'est l'orchestrateur qui commite et rebase), `glab`, les appels
  *   réseau (curl, wget, ssh…) vers GitLab, et les écritures/suppressions manifestement hors du worktree ;
- * - sur `Write` / `Edit` / `MultiEdit` / `NotebookEdit` : tout chemin résolu hors du worktree.
+ * - sur `Write` / `Edit` / `MultiEdit` / `NotebookEdit` : tout chemin résolu hors du worktree ;
+ * - sur le navigateur (Claude in Chrome, ADR amendement 4) : toute navigation hors de l'hôte local, y compris
+ *   dans un `browser_batch`, et les outils qui envoient un fichier ou téléchargent (`file_upload`,
+ *   `upload_image`, `gif_creator`). Un lien cliqué ou du JavaScript exécuté dans la page peut encore changer
+ *   d'origine : la règle vise les dérives du modèle, comme le reste du garde-fou.
  * `/tmp` et `os.tmpdir()` sont autorisés, ainsi que les racines supplémentaires d'une phase (worktree « avant »
  * de la phase de captures d'écran).
  *
@@ -554,11 +558,69 @@ function evaluateBash(fullCommand: string, worktree: string, roots: string[], de
 // Point d'entrée pur
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Navigateur (Claude in Chrome)
+// ---------------------------------------------------------------------------
+
+/** Préfixe des outils du serveur MCP Claude in Chrome (activé par `--chrome`). */
+export const CHROME_TOOL_PREFIX = "mcp__claude-in-chrome__";
+
+/**
+ * Outils du navigateur toujours refusés : `file_upload` et `upload_image` enverraient un fichier local ou une
+ * capture à une page, `gif_creator` télécharge son export dans le dossier Téléchargements (hors worktree).
+ */
+const CHROME_DENIED = new Set(["file_upload", "upload_image", "gif_creator"]);
+
+/** Hôte local : localhost, *.localhost, 127.0.0.0/8, ::1, 0.0.0.0. */
+export function isLocalHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "0.0.0.0" || /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+
+/**
+ * Le navigateur piloté est celui de l'utilisateur, avec ses sessions ouvertes (GitLab…) : la navigation est
+ * limitée à l'application lancée en local. `back` / `forward` et `about:blank` restent permis. Sans protocole,
+ * l'outil suppose https://, comme le fait Claude in Chrome.
+ */
+function evaluateNavigation(url: string): GuardDecision {
+  const raw = url.trim();
+  if (raw === "back" || raw === "forward" || raw === "about:blank") return ALLOW;
+  let parsed: URL;
+  try {
+    parsed = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^[^/:]+:\d+(?:[/?#]|$)/.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    return deny(`URL illisible : ${raw}.`);
+  }
+  if ((parsed.protocol === "http:" || parsed.protocol === "https:") && isLocalHost(parsed.hostname)) return ALLOW;
+  return deny(
+    `navigation vers ${raw} refusée : le navigateur ne sert qu'à l'application lancée en local (http://localhost:<port> ou http://127.0.0.1:<port>).`,
+  );
+}
+
+function evaluateChromeTool(name: string, obj: Record<string, unknown>, depth = 0): GuardDecision {
+  if (CHROME_DENIED.has(name)) return deny(`l'outil navigateur ${name} est désactivé dans SprintSaver.`);
+  if (name === "navigate") {
+    return typeof obj.url === "string" ? evaluateNavigation(obj.url) : ALLOW;
+  }
+  if (name === "browser_batch") {
+    if (depth > 0) return deny("browser_batch ne peut pas être imbriqué.");
+    const actions = Array.isArray(obj.actions) ? obj.actions : [];
+    for (const a of actions) {
+      const action = (a ?? {}) as { name?: unknown; input?: unknown };
+      if (typeof action.name !== "string") continue;
+      const inner = action.name.startsWith(CHROME_TOOL_PREFIX) ? action.name.slice(CHROME_TOOL_PREFIX.length) : action.name;
+      const d = evaluateChromeTool(inner, (action.input ?? {}) as Record<string, unknown>, depth + 1);
+      if (!d.allow) return d;
+    }
+  }
+  return ALLOW;
+}
+
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 /**
  * Décide si un appel d'outil est autorisé. Pure (hors lecture de os.tmpdir / realpath des racines).
- * Les outils non listés (Read, Grep, MCP…) sont toujours autorisés.
+ * Les outils non listés (Read, Grep, MCP hors navigateur…) sont toujours autorisés.
  */
 export function evaluateToolCall(
   toolName: string,
@@ -584,6 +646,10 @@ export function evaluateToolCall(
       return deny(`${toolName} sur ${bad} est hors du worktree (${worktreePath}). Seuls le worktree, /tmp et le dossier temporaire du système sont modifiables.`);
     }
     return ALLOW;
+  }
+
+  if (toolName.startsWith(CHROME_TOOL_PREFIX)) {
+    return evaluateChromeTool(toolName.slice(CHROME_TOOL_PREFIX.length), obj);
   }
 
   return ALLOW;

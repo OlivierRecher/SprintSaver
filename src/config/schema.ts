@@ -17,6 +17,9 @@ export const AGENT_PHASES = [
 ] as const;
 export type AgentPhase = (typeof AGENT_PHASES)[number];
 
+/** Phases qui pilotent Chrome par défaut : voir le résultat (review) et le capturer (ui-captures). */
+export const DEFAULT_CHROME_PHASES: readonly AgentPhase[] = ["ui-captures", "review"];
+
 export const TICKET_TYPES = ["bug", "feature"] as const;
 export type TicketType = (typeof TICKET_TYPES)[number];
 
@@ -78,6 +81,17 @@ function migrateLegacyStatus(v: unknown): unknown {
 export const StatusMappingSchema = z.preprocess(migrateLegacyStatus, StatusMappingObject);
 export type StatusRole = "inProgress" | "inReview" | "blocked";
 
+/** Version de toolchain exigée par le dépôt, relevée par `init` (ADR, amendement 5). Documentation : non lue par le moteur. */
+export const ToolchainRequirementSchema = z.object({
+  tool: z.string(),
+  required: z.string(),
+  /** D'où vient l'exigence (CI, fichier de version, manifeste, README). */
+  source: z.string().default(""),
+  /** Comment les commandes fixent la version (gestionnaire de versions, chemin…). */
+  pinnedBy: z.string().optional(),
+});
+export type ToolchainRequirement = z.infer<typeof ToolchainRequirementSchema>;
+
 export const ProjectConfigSchema = z.object({
   /** Clé courte utilisée dans les chemins et `run <name>#<iid>`. */
   name: z.string().regex(/^[a-z0-9][a-z0-9-_]*$/i),
@@ -100,11 +114,16 @@ export const ProjectConfigSchema = z.object({
    * cowDirs. Défaut : le clone de référence ~/.sprintsaver/repos/<name>.
    */
   localCheckout: z.string().optional(),
-  /** Fichiers ignorés par git à copier vers le worktree (si pas de .worktreeinclude). */
+  /**
+   * Fichiers ignorés par git nécessaires pour lancer les tests et l'application en local (config d'environnement
+   * locale, secrets de dev…), copiés vers le worktree depuis `localCheckout` (si pas de .worktreeinclude).
+   */
   worktreeInclude: z.array(z.string()).default([]),
   /** Dossiers lourds (ex. node_modules) clonés en copy-on-write depuis le clone de référence. */
   cowDirs: z.array(z.string()).default([]),
   status: StatusMappingSchema,
+  /** Versions de toolchain exigées par le dépôt et comment les commandes les fixent (relevé par `init`). */
+  toolchain: z.array(ToolchainRequirementSchema).optional(),
   typeLabels: z
     .object({
       bug: z.array(z.string()).default(["bug", "type::bug"]),
@@ -154,6 +173,17 @@ export const ConfigSchema = z.object({
   retro: z.object({ enabled: z.boolean().default(true) }).default({ enabled: true }),
   /** Captures avant/après dans la MR quand le changement touche l'interface (ADR, amendement 3). */
   screenshots: z.object({ enabled: z.boolean().default(true) }).default({ enabled: true }),
+  /**
+   * Claude in Chrome (ADR, amendement 4) : le Chrome de l'utilisateur, piloté par les sessions des phases listées
+   * pour voir le résultat et faire les captures. Navigation limitée à l'hôte local par le garde-fou. Sans
+   * extension connectée, les sessions se rabattent sur les outils headless.
+   */
+  chrome: z
+    .object({
+      enabled: z.boolean().default(true),
+      phases: z.array(z.enum(AGENT_PHASES)).default([...DEFAULT_CHROME_PHASES]),
+    })
+    .default({ enabled: true, phases: [...DEFAULT_CHROME_PHASES] }),
   transcripts: z
     .object({
       enabled: z.boolean().default(true),
@@ -163,6 +193,11 @@ export const ConfigSchema = z.object({
   projects: z.array(ProjectConfigSchema).default([]),
 });
 export type Config = z.infer<typeof ConfigSchema>;
+
+/** La session de cette phase reçoit-elle le navigateur (Claude in Chrome) ? */
+export function chromeFor(config: Config, phase: AgentPhase): boolean {
+  return config.chrome.enabled && config.chrome.phases.includes(phase);
+}
 
 export function modelFor(config: Config, phase: AgentPhase): string {
   return config.models[phase] ?? DEFAULT_PHASE_MODELS[phase];

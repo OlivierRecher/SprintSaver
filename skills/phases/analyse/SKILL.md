@@ -27,7 +27,7 @@ Le skill du type de ticket (bug ou feature) précise quoi chercher en plus, nota
 Tu reçois la liste des cases avec leur index. Rends une entrée par case, au même index, y compris pour les cases déjà cochées.
 
 - **Testable** : un test automatisé lancé par la commande de test du dépôt peut vérifier le critère par une assertion. Juge avec l'infrastructure qui existe. Un comportement d'interface est testable si le dépôt a des tests de composants ou e2e capables de l'observer, ou si la logique sous-jacente se teste à un niveau inférieur sans trahir le critère.
-- **Non testable** : validation PO ou métier, déploiement, configuration d'un environnement, documentation externe ou wiki, communication à l'équipe, critère subjectif (« plus clair », « rapide » sans seuil), action manuelle hors du dépôt.
+- **Non testable** : validation PO ou métier, déploiement, configuration d'un environnement, documentation externe ou wiki, communication à l'équipe, critère subjectif (« plus clair », « rapide » sans seuil), action manuelle hors du dépôt. Une case que son auteur a suffixée « (vérification manuelle) » est non testable : respecte ce choix.
 
 Pour une case testable, `reason` dit concrètement comment elle sera testée : niveau, entrée, assertion attendue. La phase d'écriture des tests suivra cette consigne. Pour une case non testable, écris une ligne qui apparaîtra telle quelle dans la MR.
 

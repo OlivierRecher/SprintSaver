@@ -1,54 +1,59 @@
 import { describe, expect, it } from "vitest";
-import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { detectProjectCommands } from "../../src/agent/detect-commands.js";
-import { SONNET } from "../../src/config/schema.js";
+import { DETECT_COMMANDS_PROMPT, DETECT_COMMANDS_TOOLS, detectCommandsAgent } from "../../src/agent/detect-commands.js";
 
-function fakeQuery(result: Record<string, unknown>) {
-  const seen: { prompt: string; options?: Options }[] = [];
-  const queryFn = (params: { prompt: string; options?: Options }) => {
-    seen.push(params);
-    return (async function* () {
-      yield { type: "result", num_turns: 6, total_cost_usd: 0.04, ...result } as unknown as SDKMessage;
-    })();
-  };
-  return { queryFn, seen };
-}
-
-const proposal = {
-  stack: "TypeScript / Next.js / Vitest",
-  setupCommand: " npm ci ",
-  buildCommand: "",
-  testCommand: "npm test",
-  testMode: "local",
-  cowDirs: ["node_modules", " "],
-  worktreeInclude: [".env"],
-  explanation: "package-lock.json et le job test de .gitlab-ci.yml.",
-};
-
-describe("detectProjectCommands", () => {
-  it("session Sonnet en lecture seule dans le dépôt, sans clé API ni réglages implicites", async () => {
-    const { queryFn, seen } = fakeQuery({ subtype: "success", structured_output: proposal });
-    const res = await detectProjectCommands("/tmp/repo", { queryFn, claudeExecutable: "/bin/claude" });
-    const o = seen[0]!.options!;
-    expect(o.cwd).toBe("/tmp/repo");
-    expect(o.model).toBe(SONNET);
-    expect(o.tools).toEqual(["Read", "Glob", "Grep"]);
-    expect(o.settingSources).toEqual([]);
-    expect(o.env?.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(seen[0]!.prompt).toMatch(/\.gitlab-ci\.yml/);
-    expect(res).toEqual({
-      commands: { ...proposal, setupCommand: "npm ci", cowDirs: ["node_modules"] },
-      costUsd: 0.04,
-      turns: 6,
-    });
+describe("sous-agent detect-commands", () => {
+  it("lecture du dépôt, CI, sondes et vérification ; ni Bash ni écriture", () => {
+    const def = detectCommandsAgent("claude-opus-5-5");
+    expect(def.model).toBe("claude-opus-5-5");
+    expect(def.tools).toEqual(DETECT_COMMANDS_TOOLS);
+    expect(def.tools).toEqual(
+      expect.arrayContaining([
+        "Read",
+        "Glob",
+        "Grep",
+        "mcp__sprintsaver__analyse_ci",
+        "mcp__sprintsaver__probe_toolchains",
+        "mcp__sprintsaver__list_version_managers",
+        "mcp__sprintsaver__list_local_ignored_files",
+        "mcp__sprintsaver__verify_commands",
+      ]),
+    );
+    for (const forbidden of ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Agent"]) expect(def.tools).not.toContain(forbidden);
+    expect(def.omitClaudeMd).toBe(true);
+    // Synchrone : l'agent principal attend son rapport avant de rendre sa sortie.
+    expect(def.background).toBe(false);
   });
 
-  it("échec de session ou sortie invalide : erreur explicite (init se rabat sur la détection simple)", async () => {
-    await expect(
-      detectProjectCommands("/r", { queryFn: fakeQuery({ subtype: "error_max_turns", errors: ["trop de tours"] }).queryFn, claudeExecutable: "c" }),
-    ).rejects.toThrow(/error_max_turns.*trop de tours/);
-    await expect(
-      detectProjectCommands("/r", { queryFn: fakeQuery({ subtype: "success", structured_output: { stack: "x" } }).queryFn, claudeExecutable: "c" }),
-    ).rejects.toThrow(/sortie de l'analyse invalide/);
+  it("le prompt couvre toutes les sources de version, le choix d'un gestionnaire installé, les prérequis et la ligne de base", () => {
+    for (const needle of [
+      "analyse_ci",
+      "Dockerfile",
+      ".nvmrc",
+      ".python-version",
+      "global.json",
+      "requires-python",
+      "README",
+      "probe_toolchains",
+      "list_version_managers",
+      "gestionnaire de versions déjà installé",
+      "prérequis",
+      "N'installe rien globalement",
+      "verify_commands",
+      "ligne de base",
+      "baseline_red",
+      "prerequisite_missing",
+      // Commande idiomatique du gestionnaire de versions plutôt qu'un bricolage de chemins.
+      "nvm exec 22",
+      "commande idiomatique",
+      // worktreeInclude : tests ET application, fichiers ignorés du checkout local, pendants d'exemples.
+      "list_local_ignored_files",
+      "lancer les tests ET l'application",
+      ".env pour .env.example",
+      // Seule la commande de test sert de garde-fou : les vérifications bloquantes y restent.
+      "la SEULE que l'orchestrateur exécute",
+      "typecheck, lint, tests",
+    ]) {
+      expect(DETECT_COMMANDS_PROMPT).toContain(needle);
+    }
   });
 });

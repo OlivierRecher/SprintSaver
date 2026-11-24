@@ -14,6 +14,7 @@ import { errorMessage } from "../engine/util.js";
 import { resolveClaudeExecutable } from "../agent/claude-path.js";
 import { resolveHome } from "../git/gitops.js";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 
 const exec = promisify(execFile);
 
@@ -94,6 +95,43 @@ export async function checkGitLabConnection(
   return lines;
 }
 
+/** Manifeste d'hôte natif installé par Claude Code pour l'extension Claude in Chrome. */
+const CHROME_NATIVE_HOST = "com.anthropic.claude_code_browser_extension.json";
+
+/** Dossiers d'hôtes natifs des navigateurs Chromium (macOS, puis Linux). */
+export function chromeNativeHostDirs(home: string): string[] {
+  return [
+    join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts"),
+    join(home, "Library", "Application Support", "Chromium", "NativeMessagingHosts"),
+    join(home, "Library", "Application Support", "BraveSoftware", "Brave-Browser", "NativeMessagingHosts"),
+    join(home, "Library", "Application Support", "Microsoft Edge", "NativeMessagingHosts"),
+    join(home, ".config", "google-chrome", "NativeMessagingHosts"),
+    join(home, ".config", "chromium", "NativeMessagingHosts"),
+  ];
+}
+
+/**
+ * Claude in Chrome (ADR, amendement 4) : l'extension a-t-elle été reliée à Claude Code sur ce poste ? Sans elle,
+ * les phases concernées se rabattent sur les outils headless : c'est un avertissement, pas un échec.
+ */
+export function checkClaudeInChrome(
+  config: Pick<Config, "chrome">,
+  home: string = homedir(),
+  exists: (path: string) => boolean = existsSync,
+): DoctorLine {
+  if (!config.chrome.enabled || config.chrome.phases.length === 0) {
+    return { level: "ok", msg: "Claude in Chrome désactivé (chrome.enabled)" };
+  }
+  const phases = config.chrome.phases.join(", ");
+  if (chromeNativeHostDirs(home).some((d) => exists(join(d, CHROME_NATIVE_HOST)))) {
+    return { level: "ok", msg: `Claude in Chrome : extension reliée à Claude Code, utilisée par ${phases} (Chrome doit être ouvert)` };
+  }
+  return {
+    level: "warn",
+    msg: `Claude in Chrome : extension non détectée, ${phases} se passeront du navigateur piloté. Installe l'extension Claude in Chrome puis lance \`claude --chrome\` une fois.`,
+  };
+}
+
 export async function doctorCommand(opts: { smoke?: boolean } = {}): Promise<void> {
   let failed = false;
   const report = (level: Level, msg: string) => {
@@ -134,6 +172,10 @@ export async function doctorCommand(opts: { smoke?: boolean } = {}): Promise<voi
   } catch (err) {
     report("fail", `CLI claude introuvable (installez Claude Code et connectez-vous) : ${errorMessage(err)}`);
   }
+
+  // 4a. Claude in Chrome
+  const chrome = checkClaudeInChrome(config);
+  report(chrome.level, chrome.msg);
 
   // 4b. Checkouts locaux déclarés
   for (const p of config.projects) {

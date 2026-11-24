@@ -11,7 +11,7 @@
 
 ## Captures d'écran
 
-<!-- Pour les changements d'interface (captures avant/après dans la MR) : commande pour lancer l'application
+<!-- Pour voir l'application (review dans le navigateur, captures avant/après dans la MR) : commande pour lancer l'application
      en local, URL et port, données de démo (seed, fixtures, mocks), compte de démo ou façon de contourner la
      connexion, écrans impossibles à capturer. Écrire « pas de captures possibles : <raison> » si l'appli ne
      peut pas tourner en local. -->

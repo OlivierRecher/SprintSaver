@@ -18,7 +18,7 @@ Converse dans la langue de l'utilisateur, et rédige le ticket dans la langue de
 ## 2. Explorer l'existant
 
 Explore avant de questionner : le code révèle souvent que le besoin est déjà partiellement couvert (une fonctionnalité qui existe et qu'il faut restreindre, un écran à étendre plutôt qu'à créer), ce qui change la reformulation et les questions elles-mêmes. C'est aussi ce qui rend le ticket juste et évite les doublons :
-- **le code** concerné (Grep/Glob/Read) : où vit la fonctionnalité, comment elle se comporte aujourd'hui, les composants à réutiliser, les tests existants et leur style. Tu en tires des critères réalistes (« le comportement actuel X est conservé ») et des pistes techniques ;
+- **le code** concerné (Grep/Glob/Read) : comment la fonctionnalité se comporte aujourd'hui, ses règles, ses limites. Tu en tires une reformulation juste, de meilleures questions et des critères réalistes (« le comportement actuel X est conservé »). Cette exploration sert à toi, pas au ticket : ce que tu y apprends n'y entre que traduit en fonctionnement visible (voir « Le quoi, pas le comment » en 4) ;
 - **les tickets** : `glab issue list --search "<mots-clés>" --all -O json` (plusieurs recherches courtes valent mieux qu'une longue). Un ticket ouvert qui couvre déjà le besoin → signale-le et propose de le compléter plutôt que d'en créer un doublon. Un ticket fermé similaire → lis-le (`glab issue view <iid> --comments`) : il dit souvent ce qui avait été décidé ou ce qui a déjà cassé ;
 - **les MR** liées si utile (`glab mr list --search …`).
 
@@ -44,7 +44,7 @@ Format de la description (sections vides omises) :
 
 ```markdown
 ## Contexte
-Pourquoi ce ticket existe : le problème, qui il touche, ce qui existe aujourd'hui.
+Pourquoi ce ticket existe : le problème, qui il touche, et comment l'application fonctionne aujourd'hui sur ce point (vu de l'utilisateur).
 
 ## Comportement attendu
 Ce que l'utilisateur pourra faire / verra, décrit du point de vue de l'utilisateur, avec des exemples concrets.
@@ -54,12 +54,11 @@ Ce que l'utilisateur pourra faire / verra, décrit du point de vue de l'utilisat
 
 ## Critères d'acceptation
 - [ ] …
-
-## Pistes techniques
-- Fichiers / composants concernés, existant à réutiliser, contraintes connues. Des indications, pas une solution imposée.
 ```
 
 Pour un bug, remplace « Comportement attendu » par « Reproduction » (étapes numérotées, résultat observé, résultat attendu, environnement).
+
+**Le quoi, pas le comment.** Le ticket dit ce que le produit doit faire et pourquoi, jamais comment le construire. Pas de section de pistes techniques, et aucun détail technique de l'existant : ni nom de fichier, de composant, de table, de fonction, de clé de traduction ou de bibliothèque, ni valeur interne (poids, constantes, codes). La découverte du code revient à la personne qui implémente. L'existant se décrit comme un fonctionnement observable : « aujourd'hui, un bénévole qui a candidaté passe devant un bénévole compétent », pas « le bonus de candidature (300) dépasse celui de compétence (120) ».
 
 **Les cases à cocher sont réservées aux critères d'acceptation.** Les agents de code et outils d'automatisation considèrent souvent CHAQUE case de la description comme un critère à prouver : une case ailleurs (liste de tâches, checklist de doc) deviendrait un faux critère. Partout ailleurs, utilise des puces simples.
 
@@ -71,7 +70,7 @@ C'est le cœur du ticket. Chaque critère :
 - n'utilise pas de mots non mesurables (« rapide », « intuitif », « correct », « bien géré ») sans les chiffrer ou les expliciter ;
 - se lit sans le reste du ticket.
 
-« Vérifiable par un test » porte sur le **résultat observable**, pas sur la façon de le tester. Si l'écran n'a pas de tests d'interface, le critère reste formulé côté utilisateur (« le bouton n'est plus proposé »). C'est à l'implémentation de choisir le niveau de test (logique sous-jacente, composant…), et tu peux l'y aider dans les pistes techniques. N'écris pas de critère sur une fonction ou une structure interne.
+« Vérifiable par un test » porte sur le **résultat observable**, pas sur la façon de le tester. Si l'écran n'a pas de tests d'interface, le critère reste formulé côté utilisateur (« le bouton n'est plus proposé »). C'est à l'implémentation de choisir le niveau de test (logique sous-jacente, composant…). N'écris pas de critère sur une fonction ou une structure interne.
 
 **Bornes** (dates, durées, quantités) : teste les deux côtés de la limite avec des valeurs proches (« dans 24 h 01 min » est accepté, « dans 23 h 59 min » est refusé) et dis explicitement si la valeur exacte est incluse. Pour les durées, précise la référence (heure de début de quoi, fuseau, heure d'été) quand ça peut prêter à confusion.
 
@@ -89,6 +88,7 @@ Avant de montrer le brouillon, relis-le comme le ferait la personne qui va l'imp
 - chaque critère est-il testable et sans ambiguïté ? Deux développeurs différents écriraient-ils le même test ?
 - un cas limite ou une erreur plausible n'est-il couvert par aucun critère ?
 - un critère impose-t-il une implémentation sans raison ?
+- reste-t-il un détail technique (fichier, composant, table, fonction, valeur interne) ? Remplace-le par le fonctionnement qu'il produit, ou retire-le.
 - reste-t-il une question ouverte ? Si oui, pose-la maintenant plutôt que de l'écrire dans le ticket.
 
 Montre ensuite à l'utilisateur le titre proposé (court, à l'impératif ou descriptif, sans numéro), les labels (`bug` ou `feature` s'ils existent dans le projet : `glab label list` ; s'il n'a pas pu être lu, propose-les « à vérifier ») et la description complète. Liste aussi les hypothèses que tu as prises sans confirmation explicite, pour qu'il les valide d'un coup d'œil. En mode modification, montre clairement ce qui change par rapport à l'existant. Intègre ses retours et remontre jusqu'à validation explicite (« ok », « crée-le », « vas-y »…).

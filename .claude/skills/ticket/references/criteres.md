@@ -25,7 +25,7 @@ Passe le besoin à travers chaque ligne. Pour chacune, demande-toi « qu'est-ce 
 **Trop vague → précis et testable**
 
 - ✗ `- [ ] Le prix s'affiche correctement`
-  ✓ `- [ ] formatPrice(1050) renvoie « 10,50 € » (virgule décimale, toujours deux décimales)`
+  ✓ `- [ ] Une mission à 10,5 € affiche « 10,50 € » sur sa fiche (virgule décimale, toujours deux décimales)`
 - ✗ `- [ ] Gérer les erreurs de connexion`
   ✓ `- [ ] Si l'API renvoie une erreur réseau à l'envoi du formulaire, le message « Connexion impossible, réessaie » s'affiche et les champs saisis sont conservés`
 - ✗ `- [ ] La recherche est rapide`

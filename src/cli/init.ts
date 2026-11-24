@@ -1,62 +1,147 @@
 /**
- * `sprintsaver init` : configuration interactive (GitLab, projets, commandes, statuts, labels, identité git).
- * Relit la config existante pour pré-remplir les réponses ; la config produite reste éditable à la main.
+ * `sprintsaver init` : configuration de SprintSaver (ADR § 12, amendements 2 et 5).
+ *
+ * Partie déterministe : instance GitLab, connexion glab, identité, choix des projets, auteur des commits, et toutes
+ * les écritures (labels créés sur GitLab, config). Pour chaque projet, un agent de configuration propose la config
+ * complète (commandes vérifiées par une exécution réelle, statuts, labels…) ; le code l'affiche, l'utilisateur la
+ * valide, en modifie un champ ou annule. Rien n'est écrit avant validation. Si l'agent échoue, la détection simple
+ * et les questions champ par champ prennent le relais.
+ *
+ * `--yes` : aucune question, propositions acceptées. `--dry-run` : aucune écriture sur GitLab, config affichée ou
+ * écrite dans `--output`, jamais dans la config de SprintSaver.
  */
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { rename } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { checkbox, confirm, input, select } from "@inquirer/prompts";
+import YAML from "yaml";
 import { loadConfig, saveConfig } from "../config/load.js";
 import { paths } from "../config/paths.js";
-import {
-  ConfigSchema,
-  ProjectConfigSchema,
-  type Config,
-  type ProjectConfig,
-  type StatusMapping,
-  type StatusTarget,
-} from "../config/schema.js";
-import { detectProjectCommands, type DetectedCommands } from "../agent/detect-commands.js";
+import { ConfigSchema, type Config, type ProjectConfig, type StatusTarget } from "../config/schema.js";
+import type { GitOps } from "../contracts.js";
+import { configAgentModels, runConfigAgent } from "../agent/config-agent.js";
+import { createInitServer, type InitToolsDeps, type InitToolsState } from "../agent/config-tools.js";
+import type { QueryFn } from "../agent/runner.js";
 import { createGitOps, resolveHome } from "../git/gitops.js";
 import {
   analyseProject,
   createLabel,
   defaultProjectName,
   findUserByUsername,
+  getCiConfig,
+  getProject,
   getUserDetails,
-  resolveApiBase,
-  UserLookupUnavailableError,
-  guessForRole,
-  guessTypeLabels,
   listAllowedStatuses,
   listLabels,
   listMemberProjects,
+  resolveApiBase,
+  UserLookupUnavailableError,
   type NativeStatus,
+  type ProjectAnalysis,
   type ProjectInfo,
   type StatusRoleName,
   type UserDetails,
 } from "../gitlab/discovery.js";
-import { createGitLabRest, GitLabHttpError, type GitLabRest } from "../gitlab/rest.js";
+import { createGitLabRest, GitLabHttpError, type FetchFn, type GitLabRest } from "../gitlab/rest.js";
+import { glabToken, glabVersion, GlabAuthError, hostOf, type ExecFn, type TokenProvider } from "../gitlab/glab-auth.js";
+import { findLocalCheckouts, isCheckoutOf, listIgnoredFiles } from "../init/local-checkout.js";
 import {
-  glabToken,
-  glabVersion,
-  GlabAuthError,
-  hostOf,
-  type ExecFn,
-  type TokenProvider,
-} from "../gitlab/glab-auth.js";
+  CREATE_PREFIX,
+  DEFAULT_STATUS_LABELS,
+  ROLE_LABELS,
+  currentVerification,
+  formatProposal,
+  labelsToCreate,
+  proposalFromAgent,
+  proposalFromDetection,
+  statusChoices,
+  suggestProjectName,
+  validateProjectName,
+  type LabelSpec,
+  type ProjectProposal,
+  type ProposalContext,
+} from "../init/proposal.js";
+import { defaultProbeDeps, listVersionManagers, probeToolchains, type ProbeDeps } from "../init/toolchains.js";
+import { verifyCommands, type VerifyInput } from "../init/verify.js";
+import { errorMessage } from "../engine/util.js";
 
-const TRIGGER_LABEL_COLOR = "#6699cc";
+export {
+  DEFAULT_STATUS_LABELS,
+  statusChoices,
+  suggestProjectName,
+  typeLabelChoices,
+  validateProjectName,
+  type StatusChoice,
+} from "../init/proposal.js";
+
 const NONE = "-";
-const ROLE_LABELS: Record<StatusRoleName, string> = {
-  inProgress: "en cours",
-  inReview: "livré en review",
-  blocked: "bloqué",
-};
-
 const out = (s = "") => process.stdout.write(`${s}\n`);
 
-async function gitGlobal(key: string): Promise<string | undefined> {
+// ---------------------------------------------------------------------------
+// Options et dépendances
+// ---------------------------------------------------------------------------
+
+export interface InitOptions {
+  /** Config de SprintSaver (défaut : `$SPRINTSAVER_HOME/config.yaml`). */
+  configPath?: string;
+  /** Aucune question : propositions acceptées, valeurs existantes ou par défaut pour le reste. */
+  yes?: boolean;
+  /** Aucune écriture sur GitLab ; config affichée, ou écrite dans `output`, jamais dans `configPath`. */
+  dryRun?: boolean;
+  /** Projets à configurer (chemin `groupe/projet` ou URL). */
+  projects?: string[];
+  /** Fichier où écrire la config produite, à la place de `configPath`. */
+  output?: string;
+  /** Instance GitLab. */
+  url?: string;
+  /** Username de l'humain à qui assigner les MR (jeton de projet, mode --yes). */
+  username?: string;
+  /** false : pas d'agent de configuration, détection simple (`--no-agent`). */
+  agent?: boolean;
+}
+
+/** Questions posées à l'utilisateur (injectable pour les tests). */
+export interface Prompter {
+  input(o: { message: string; default?: string; required?: boolean; validate?: (v: string) => true | string }): Promise<string>;
+  confirm(o: { message: string; default?: boolean }): Promise<boolean>;
+  select<T>(o: { message: string; choices: { name: string; value: T }[]; default?: T; pageSize?: number }): Promise<T>;
+  checkbox<T>(o: { message: string; choices: { name: string; value: T; checked?: boolean }[]; pageSize?: number; required?: boolean }): Promise<T[]>;
+}
+
+const inquirerPrompter: Prompter = {
+  input: (o) => input(o),
+  confirm: (o) => confirm(o),
+  select: (o) => select(o),
+  checkbox: (o) => checkbox(o),
+};
+
+/** En mode --yes, toute question est un bug : on échoue au lieu d'attendre une réponse. */
+const noQuestions: Prompter = {
+  input: (o) => Promise.reject(new Error(`question posée en mode --yes : ${o.message}`)),
+  confirm: (o) => Promise.reject(new Error(`question posée en mode --yes : ${o.message}`)),
+  select: (o) => Promise.reject(new Error(`question posée en mode --yes : ${o.message}`)),
+  checkbox: (o) => Promise.reject(new Error(`question posée en mode --yes : ${o.message}`)),
+};
+
+export interface InitDeps {
+  prompter?: Prompter;
+  say?: (s: string) => void;
+  /** `fetch` du client GitLab et de la découverte de l'instance. */
+  fetch?: FetchFn;
+  glabExec?: ExecFn;
+  glabLogin?: (host: string) => Promise<boolean>;
+  makeGitOps?: (token: TokenProvider) => GitOps;
+  queryFn?: QueryFn;
+  claudeExecutable?: string;
+  probeDeps?: ProbeDeps;
+  /** Racines de la recherche de checkout local (défaut : dossiers usuels du dossier personnel). */
+  checkoutRoots?: string[];
+  gitGlobal?: (key: string) => Promise<string | undefined>;
+}
+
+async function gitGlobalDefault(key: string): Promise<string | undefined> {
   try {
     const { stdout } = await promisify(execFile)("git", ["config", "--global", key]);
     return stdout.trim() || undefined;
@@ -72,13 +157,6 @@ function splitList(s: string): string[] {
     .filter((x) => x && x !== NONE);
 }
 
-/** Saisie optionnelle : `-` pour vider. */
-async function optionalInput(message: string, def: string | undefined): Promise<string | undefined> {
-  const v = await input({ message: `${message} (« ${NONE} » pour aucune)`, default: def ?? NONE });
-  const t = v.trim();
-  return t && t !== NONE ? t : undefined;
-}
-
 /**
  * Noms des projets existants re-sélectionnés : réservés dès le départ, pour qu'un nouveau projet traité
  * avant eux ne prenne pas leur nom.
@@ -92,331 +170,41 @@ export function reservedProjectNames(selectedIds: number[], priorById: Map<numbe
   return names;
 }
 
-/** Valide un nom court ; `ownName` (nom actuel du projet) reste autorisé pour lui-même. */
-export function validateProjectName(v: string, usedNames: Set<string>, ownName?: string): true | string {
-  if (!/^[a-z0-9][a-z0-9-_]*$/i.test(v)) return "Lettres, chiffres, - et _ uniquement (commence par une lettre ou un chiffre).";
-  if (usedNames.has(v) && v !== ownName) return "Nom déjà utilisé par un autre projet.";
-  return true;
+/** `groupe/projet`, ou chemin extrait d'une URL de projet (ou d'une de ses pages) sous l'instance `base`. */
+export function normalizeProjectArg(arg: string, base?: string): string {
+  const a = arg.trim();
+  if (!/^https?:\/\//i.test(a)) return a.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  const u = new URL(a);
+  let path = decodeURIComponent(u.pathname.split("/-/")[0]!);
+  const basePath = base ? new URL(base).pathname.replace(/\/+$/, "") : "";
+  if (basePath && path.startsWith(`${basePath}/`)) path = path.slice(basePath.length);
+  return path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
 }
 
-/** Nom proposé par défaut : le nom actuel, sinon `base` suffixé (-2, -3…) s'il est déjà pris. */
-export function suggestProjectName(base: string, usedNames: Set<string>, ownName?: string): string {
-  if (ownName) return ownName;
-  if (!usedNames.has(base)) return base;
-  for (let n = 2; ; n++) {
-    const candidate = `${base}-${n}`;
-    if (!usedNames.has(candidate)) return candidate;
-  }
-}
-
-async function readExisting(file: string): Promise<Config | null> {
+async function readExisting(file: string, say: (s: string) => void): Promise<Config | null> {
   if (!existsSync(file)) return null;
   try {
     return await loadConfig(file);
   } catch (err) {
-    out(`⚠ Config existante illisible, elle sera remplacée : ${err instanceof Error ? err.message : String(err)}`);
+    say(`⚠ Config existante illisible, elle sera remplacée : ${errorMessage(err)}`);
     return null;
   }
 }
 
-/** Labels de statut proposés à la création quand le projet n'a rien d'adapté. */
-export const DEFAULT_STATUS_LABELS: Record<StatusRoleName, { name: string; color: string; description: string }> = {
-  inProgress: { name: "sprintsaver::en-cours", color: "#1f75cb", description: "SprintSaver traite ce ticket." },
-  inReview: { name: "sprintsaver::en-review", color: "#108548", description: "SprintSaver a livré une MR à relire." },
-  blocked: { name: "sprintsaver::bloque", color: "#dd2b0e", description: "SprintSaver est bloqué : voir son dernier commentaire." },
-};
-
-const TYPE_LABEL_COLORS = { bug: "#dd2b0e", feature: "#428bca" } as const;
-
-export type StatusChoice =
-  | { kind: "native"; id: string; name: string }
-  | { kind: "label"; name: string }
-  | { kind: "create"; name: string }
-  | { kind: "create-other" };
-
-function choiceValue(c: StatusChoice): string {
-  return c.kind === "native" ? `native:${c.id}` : c.kind === "create-other" ? "create-other" : `${c.kind}:${c.name}`;
-}
-
-/**
- * Choix proposés pour un rôle de statut : statuts natifs, labels existants, création du label proposé s'il
- * n'existe pas, création d'un autre label. Défaut : la cible actuelle si elle existe encore, sinon le statut natif
- * ou le label qui ressemble au rôle, sinon la création du label proposé.
- */
-export function statusChoices(
-  role: StatusRoleName,
-  natives: NativeStatus[],
-  labels: string[],
-  prior: StatusTarget | undefined,
-): { choices: { name: string; value: string; choice: StatusChoice }[]; defaultValue: string } {
-  const proposed = DEFAULT_STATUS_LABELS[role].name;
-  const choices: { name: string; value: string; choice: StatusChoice }[] = [
-    ...natives.map((n) => ({ name: `Statut natif : ${n.name}`, choice: { kind: "native" as const, id: n.id, name: n.name } })),
-    ...labels.map((l) => ({ name: `Label : ${l}`, choice: { kind: "label" as const, name: l } })),
-    ...(labels.includes(proposed) ? [] : [{ name: `Créer le label « ${proposed} »`, choice: { kind: "create" as const, name: proposed } }]),
-    { name: "Créer un autre label…", choice: { kind: "create-other" as const } },
-  ].map((c) => ({ ...c, value: choiceValue(c.choice) }));
-
-  let def: StatusChoice | undefined;
-  if (prior?.kind === "native" && natives.some((n) => n.id === prior.id)) def = { ...prior };
-  else if (prior?.kind === "label") def = labels.includes(prior.name) ? { kind: "label", name: prior.name } : { kind: "create", name: prior.name };
-  if (!def) {
-    const nativeGuess = natives.find((n) => n.name === guessForRole(role, natives.map((x) => x.name)));
-    const labelGuess = guessForRole(role, labels);
-    def = nativeGuess
-      ? { kind: "native", id: nativeGuess.id, name: nativeGuess.name }
-      : labelGuess
-        ? { kind: "label", name: labelGuess }
-        : { kind: "create", name: proposed };
-  }
-  const defaultValue = choiceValue(def);
-  // Ancien label disparu du projet : on propose de le recréer.
-  if (!choices.some((c) => c.value === defaultValue)) choices.unshift({ name: `Créer le label « ${(def as { name: string }).name} »`, value: defaultValue, choice: def });
-  return { choices, defaultValue };
-}
-
 /** Crée un label en tolérant qu'il existe déjà (409). */
-async function ensureLabel(rest: GitLabRest, projectId: number, name: string, color: string, description: string): Promise<void> {
+async function ensureLabel(rest: GitLabRest, projectId: number, spec: LabelSpec, say: (s: string) => void): Promise<void> {
   try {
-    await createLabel(rest, projectId, name, color, description);
-    out(`  Label « ${name} » créé.`);
+    await createLabel(rest, projectId, spec.name, spec.color, spec.description);
+    say(`  Label « ${spec.name} » créé.`);
   } catch (err) {
     if (err instanceof GitLabHttpError && err.status === 409) return;
     throw err;
   }
 }
 
-async function askStatusTarget(
-  rest: GitLabRest,
-  projectId: number,
-  role: StatusRoleName,
-  natives: NativeStatus[],
-  labels: string[],
-  prior: StatusTarget | undefined,
-): Promise<StatusTarget> {
-  const { choices, defaultValue } = statusChoices(role, natives, labels, prior);
-  const value = await select({
-    message: `Statut « ${ROLE_LABELS[role]} »`,
-    choices: choices.map(({ name, value }) => ({ name, value })),
-    default: defaultValue,
-    pageSize: 15,
-  });
-  const choice = choices.find((c) => c.value === value)!.choice;
-  if (choice.kind === "native") return choice;
-  if (choice.kind === "label") return choice;
-  const name =
-    choice.kind === "create"
-      ? choice.name
-      : (await input({ message: `Nom du label « ${ROLE_LABELS[role]} »`, default: DEFAULT_STATUS_LABELS[role].name, required: true })).trim();
-  if (!labels.includes(name)) {
-    const d = DEFAULT_STATUS_LABELS[role];
-    await ensureLabel(rest, projectId, name, d.color, d.description);
-    labels.push(name);
-  }
-  return { kind: "label", name };
-}
-
-const CREATE_PREFIX = "\u0000create:";
-
-/**
- * Choix pour les labels d'un type de ticket : labels existants (cochés si déjà retenus ou s'ils ressemblent au type),
- * plus « Créer le label <type> » s'il n'existe pas, coché d'office quand rien d'autre ne correspond.
- */
-export function typeLabelChoices(
-  type: "bug" | "feature",
-  labels: string[],
-  prior: string[] | undefined,
-): { name: string; value: string; checked: boolean }[] {
-  const preselected = new Set((prior ?? guessTypeLabels(type, labels)).filter((l) => labels.includes(l)));
-  return [
-    ...labels.map((l) => ({ name: l, value: l, checked: preselected.has(l) })),
-    ...(labels.includes(type)
-      ? []
-      : [{ name: `Créer le label « ${type} »`, value: `${CREATE_PREFIX}${type}`, checked: preselected.size === 0 }]),
-  ];
-}
-
-async function askTypeLabels(
-  rest: GitLabRest,
-  projectId: number,
-  type: "bug" | "feature",
-  labels: string[],
-  prior: string[] | undefined,
-): Promise<string[]> {
-  const picked = await checkbox({
-    message: `Labels désignant un ticket « ${type} »`,
-    choices: typeLabelChoices(type, labels, prior),
-    pageSize: 15,
-  });
-  const result: string[] = [];
-  for (const v of picked) {
-    if (!v.startsWith(CREATE_PREFIX)) {
-      result.push(v);
-      continue;
-    }
-    const name = v.slice(CREATE_PREFIX.length);
-    await ensureLabel(rest, projectId, name, TYPE_LABEL_COLORS[type], `Ticket de type ${type}.`);
-    labels.push(name);
-    result.push(name);
-  }
-  return result;
-}
-
-/** Dossier analysé par Claude : le checkout local s'il existe, sinon le clone de référence (créé au besoin). */
-async function repoDirForAnalysis(
-  token: TokenProvider,
-  info: ProjectInfo,
-  name: string,
-  localCheckout: string | undefined,
-): Promise<string> {
-  if (localCheckout && existsSync(resolveHome(localCheckout))) return resolveHome(localCheckout);
-  const provisional = ProjectConfigSchema.parse({
-    name,
-    id: info.id,
-    path: info.pathWithNamespace,
-    httpUrl: info.httpUrl,
-    defaultBranch: info.defaultBranch,
-    status: { inProgress: { kind: "label", name: "x" }, inReview: { kind: "label", name: "x" }, blocked: { kind: "label", name: "x" } },
-  });
-  out("  Clone du dépôt pour l'analyse…");
-  return createGitOps({ token }).ensureReferenceClone(provisional);
-}
-
-async function configureProject(
-  rest: GitLabRest,
-  token: TokenProvider,
-  info: ProjectInfo,
-  prior: ProjectConfig | undefined,
-  usedNames: Set<string>,
-  triggerLabel: string,
-): Promise<ProjectConfig> {
-  out();
-  out(`── ${info.pathWithNamespace} ──`);
-
-  const name = await input({
-    message: "Nom court du projet",
-    default: suggestProjectName(defaultProjectName(info.pathWithNamespace), usedNames, prior?.name),
-    validate: (v) => validateProjectName(v, usedNames, prior?.name),
-  });
-  if (prior && prior.name !== name) usedNames.delete(prior.name);
-  usedNames.add(name);
-
-  const localCheckout = await optionalInput(
-    "Ton checkout local de ce projet, d'où copier .env et dossiers de dépendances (ex. ~/code/projet)",
-    prior?.localCheckout,
-  );
-
-  const analysis = await analyseProject(rest, info.id, info.defaultBranch);
-  const det = analysis.stacks[0];
-  out(`  CI : ${analysis.hasCi ? `présente, pipeline ${analysis.ciSource === "merge_request" ? "de MR" : "de branche"}` : "absente"}`);
-  if (analysis.hasWorktreeInclude) {
-    out(`  .worktreeinclude présent sur ${info.defaultBranch} : il choisit les fichiers ignorés à copier dans chaque worktree.`);
-  }
-
-  // Commandes : proposées par une session Claude en lecture seule, validées une à une par l'utilisateur.
-  let ai: DetectedCommands | undefined;
-  const runAi = prior?.testCommand
-    ? await confirm({ message: "Refaire analyser les commandes par Claude ? (sinon les actuelles sont proposées)", default: false })
-    : true;
-  if (runAi) {
-    try {
-      const dir = await repoDirForAnalysis(token, info, name, localCheckout);
-      out("  Analyse du dépôt par Claude (lecture seule, environ une minute)…");
-      const res = await detectProjectCommands(dir);
-      ai = res.commands;
-      out(`  Stack : ${ai.stack}`);
-      out(`  ${ai.explanation}`);
-      out(`  (analyse en ${res.turns} tours, coût estimé ~$${res.costUsd.toFixed(2)})`);
-    } catch (err) {
-      out(`  ⚠ Analyse par Claude impossible (${err instanceof Error ? err.message : String(err)}) : propositions par détection simple.`);
-    }
-  }
-  const by = ai ? " — proposée par Claude" : "";
-  const proposal = (fromAi: string | undefined, fromPrior: string | undefined, fromDet: string | undefined) =>
-    ai ? fromAi || undefined : prior ? fromPrior : fromDet;
-
-  const setupCommand = await optionalInput(`Commande de setup${by}`, proposal(ai?.setupCommand, prior?.setupCommand, det?.setupCommand));
-  const buildCommand = await optionalInput(`Commande de build${by}`, proposal(ai?.buildCommand, prior?.buildCommand, det?.buildCommand));
-  const testCommand = await optionalInput(`Commande de test${by}`, proposal(ai?.testCommand, prior?.testCommand, det?.testCommand));
-
-  const testMode = await select({
-    message: `Mode de test${by}`,
-    choices: [
-      { name: "local (tests lancés dans le worktree)", value: "local" as const },
-      { name: "ci-only (les tests passent par la CI)", value: "ci-only" as const },
-    ],
-    default: ai?.testMode ?? prior?.testMode ?? (testCommand ? "local" : "ci-only"),
-  });
-
-  const ciSource = await select({
-    message: "Pipeline à surveiller après un push",
-    choices: [
-      { name: "pipeline de merge request", value: "merge_request" as const },
-      { name: "pipeline de branche", value: "branch" as const },
-    ],
-    default: prior?.ciSource ?? analysis.ciSource,
-  });
-
-  // Le `.worktreeinclude` versionné (lu sur origin/<defaultBranch> par prepareWorktree) prime : la liste de la
-  // config ne sert que de repli s'il disparaît, on conserve donc l'existante sans la redemander.
-  const includeDefault = ai?.worktreeInclude ?? prior?.worktreeInclude ?? [];
-  const worktreeInclude = analysis.hasWorktreeInclude
-    ? (prior?.worktreeInclude ?? [])
-    : splitList(
-        await input({
-          message: `Fichiers ignorés par git à copier dans chaque worktree${by} (séparés par des virgules, « ${NONE} » pour aucun)`,
-          default: includeDefault.length ? includeDefault.join(", ") : NONE,
-        }),
-      );
-
-  const cowDefault = ai?.cowDirs ?? prior?.cowDirs ?? det?.cowDirs ?? [];
-  const cowDirs = splitList(
-    await input({
-      message: `Dossiers de dépendances à cloner en copy-on-write${by} (séparés par des virgules, « ${NONE} » pour aucun)`,
-      default: cowDefault.length ? cowDefault.join(", ") : NONE,
-    }),
-  );
-
-  // Statuts : pour chaque rôle, un statut natif ou un label (existant ou créé à la volée).
-  const labels = (await listLabels(rest, info.id)).map((l) => l.name);
-  const natives = await listAllowedStatuses(rest, info.pathWithNamespace);
-  if (natives.length > 0) out(`  Statuts natifs disponibles : ${natives.map((n) => n.name).join(", ")}`);
-  const status: StatusMapping = {
-    inProgress: await askStatusTarget(rest, info.id, "inProgress", natives, labels, prior?.status.inProgress),
-    inReview: await askStatusTarget(rest, info.id, "inReview", natives, labels, prior?.status.inReview),
-    blocked: await askStatusTarget(rest, info.id, "blocked", natives, labels, prior?.status.blocked),
-  };
-
-  const typeLabels = {
-    bug: await askTypeLabels(rest, info.id, "bug", labels, prior?.typeLabels.bug),
-    feature: await askTypeLabels(rest, info.id, "feature", labels, prior?.typeLabels.feature),
-  };
-
-  if (!labels.includes(triggerLabel)) {
-    await ensureLabel(rest, info.id, triggerLabel, TRIGGER_LABEL_COLOR, "SprintSaver : ticket prêt à être pris en charge automatiquement.");
-  } else {
-    out(`  Label « ${triggerLabel} » déjà présent.`);
-  }
-
-  return {
-    name,
-    id: info.id,
-    path: info.pathWithNamespace,
-    httpUrl: info.httpUrl,
-    defaultBranch: info.defaultBranch,
-    stack: ai?.stack ?? det?.stack ?? prior?.stack,
-    setupCommand,
-    buildCommand,
-    testCommand,
-    testMode,
-    ciSource,
-    localCheckout,
-    worktreeInclude,
-    cowDirs,
-    status,
-    typeLabels,
-  };
-}
+// ---------------------------------------------------------------------------
+// Connexion et identité
+// ---------------------------------------------------------------------------
 
 /**
  * Jeton de projet : demande le username GitLab de l'humain à qui assigner les MR et résout son id
@@ -496,98 +284,566 @@ export async function ensureGlabConnection(
   return provider;
 }
 
-export async function runInit(opts: { configPath?: string } = {}): Promise<void> {
-  const file = opts.configPath ?? paths.config();
-  const existing = await readExisting(file);
-  if (existing) out(`Config existante trouvée (${file}) : ses valeurs sont proposées par défaut.`);
+// ---------------------------------------------------------------------------
+// Édition d'un champ (validation, et questions du repli)
+// ---------------------------------------------------------------------------
 
+export const EDITABLE_FIELDS = [
+  ["name", "Nom court"],
+  ["localCheckout", "Checkout local"],
+  ["setupCommand", "Commande de setup"],
+  ["buildCommand", "Commande de build"],
+  ["testCommand", "Commande de test"],
+  ["testMode", "Mode de test"],
+  ["ciSource", "Pipeline surveillé"],
+  ["worktreeInclude", "Fichiers ignorés à copier (config locale, secrets de dev)"],
+  ["cowDirs", "Dossiers de dépendances (copy-on-write)"],
+  ["status.inProgress", "Statut « en cours »"],
+  ["status.inReview", "Statut « livré en review »"],
+  ["status.blocked", "Statut « bloqué »"],
+  ["typeLabels.bug", "Labels « bug »"],
+  ["typeLabels.feature", "Labels « feature »"],
+] as const;
+export type EditableField = (typeof EDITABLE_FIELDS)[number][0];
+
+const COMMAND_FIELDS = new Set<EditableField>(["setupCommand", "buildCommand", "testCommand", "worktreeInclude", "cowDirs", "localCheckout"]);
+
+/**
+ * Choix des labels d'un type pendant l'édition : labels existants (cochés s'ils sont retenus), labels retenus qui
+ * n'existent pas encore (« à créer », cochés), et création du label au nom du type.
+ */
+export function typeLabelEditChoices(type: "bug" | "feature", labels: string[], current: string[]): { name: string; value: string; checked: boolean }[] {
+  const missing = current.filter((l) => !labels.includes(l));
+  return [
+    ...labels.map((l) => ({ name: l, value: l, checked: current.includes(l) })),
+    ...missing.map((l) => ({ name: `Créer le label « ${l} »`, value: `${CREATE_PREFIX}${l}`, checked: true })),
+    ...(labels.includes(type) || missing.includes(type) ? [] : [{ name: `Créer le label « ${type} »`, value: `${CREATE_PREFIX}${type}`, checked: false }]),
+  ];
+}
+
+async function optionalInput(ask: Prompter, message: string, def: string | undefined): Promise<string | undefined> {
+  const v = await ask.input({ message: `${message} (« ${NONE} » pour aucune)`, default: def ?? NONE });
+  const t = v.trim();
+  return t && t !== NONE ? t : undefined;
+}
+
+async function askStatusTarget(ask: Prompter, role: StatusRoleName, natives: NativeStatus[], labels: string[], current: StatusTarget): Promise<StatusTarget> {
+  const { choices, defaultValue } = statusChoices(role, natives, labels, current);
+  const value = await ask.select({
+    message: `Statut « ${ROLE_LABELS[role]} » (un label absent sera créé après validation)`,
+    choices: choices.map(({ name, value }) => ({ name, value })),
+    default: defaultValue,
+    pageSize: 15,
+  });
+  const choice = choices.find((c) => c.value === value)!.choice;
+  if (choice.kind === "native") return choice;
+  if (choice.kind === "label" || choice.kind === "create") return { kind: "label", name: choice.name };
+  const name = (await ask.input({ message: `Nom du label « ${ROLE_LABELS[role]} »`, default: DEFAULT_STATUS_LABELS[role].name, required: true })).trim();
+  return { kind: "label", name };
+}
+
+interface FieldContext {
+  ask: Prompter;
+  labels: string[];
+  natives: NativeStatus[];
+  usedNames: Set<string>;
+  priorName?: string;
+}
+
+/** Pose la question d'un champ et met à jour la config proposée. */
+export async function editField(field: EditableField, c: ProjectConfig, fc: FieldContext): Promise<void> {
+  const { ask } = fc;
+  switch (field) {
+    case "name":
+      c.name = (await ask.input({ message: "Nom court du projet", default: c.name, validate: (v) => validateProjectName(v.trim(), fc.usedNames, fc.priorName) })).trim();
+      return;
+    case "localCheckout":
+      c.localCheckout = (await optionalInput(ask, "Ton checkout local de ce projet, d'où copier .env et dossiers de dépendances (ex. ~/code/projet)", c.localCheckout)) ?? undefined;
+      return;
+    case "setupCommand":
+      c.setupCommand = await optionalInput(ask, "Commande de setup", c.setupCommand);
+      return;
+    case "buildCommand":
+      c.buildCommand = await optionalInput(ask, "Commande de build", c.buildCommand);
+      return;
+    case "testCommand":
+      c.testCommand = await optionalInput(ask, "Commande de test", c.testCommand);
+      return;
+    case "testMode":
+      c.testMode = await ask.select({
+        message: "Mode de test",
+        choices: [
+          { name: "local (tests lancés dans le worktree)", value: "local" as const },
+          { name: "ci-only (les tests passent par la CI)", value: "ci-only" as const },
+        ],
+        default: c.testMode,
+      });
+      return;
+    case "ciSource":
+      c.ciSource = await ask.select({
+        message: "Pipeline à surveiller après un push",
+        choices: [
+          { name: "pipeline de merge request", value: "merge_request" as const },
+          { name: "pipeline de branche", value: "branch" as const },
+        ],
+        default: c.ciSource,
+      });
+      return;
+    case "worktreeInclude":
+    case "cowDirs": {
+      const message =
+        field === "worktreeInclude"
+          ? `Fichiers ignorés par git nécessaires pour lancer les tests et l'application (config d'environnement locale, secrets de dev), copiés depuis le checkout local (séparés par des virgules, « ${NONE} » pour aucun)`
+          : `Dossiers de dépendances à cloner en copy-on-write (séparés par des virgules, « ${NONE} » pour aucun)`;
+      const current = c[field];
+      c[field] = splitList(await ask.input({ message, default: current.length ? current.join(", ") : NONE }));
+      return;
+    }
+    case "status.inProgress":
+    case "status.inReview":
+    case "status.blocked": {
+      const role = field.slice("status.".length) as StatusRoleName;
+      c.status[role] = await askStatusTarget(ask, role, fc.natives, fc.labels, c.status[role]);
+      return;
+    }
+    case "typeLabels.bug":
+    case "typeLabels.feature": {
+      const type = field.slice("typeLabels.".length) as "bug" | "feature";
+      const picked = await ask.checkbox({
+        message: `Labels désignant un ticket « ${type} » (un label absent sera créé après validation)`,
+        choices: typeLabelEditChoices(type, fc.labels, c.typeLabels[type]),
+        pageSize: 15,
+      });
+      c.typeLabels[type] = picked.map((v) => (v.startsWith(CREATE_PREFIX) ? v.slice(CREATE_PREFIX.length) : v));
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Un projet
+// ---------------------------------------------------------------------------
+
+interface InitEnv {
+  opts: InitOptions;
+  deps: InitDeps;
+  ask: Prompter;
+  say: (s: string) => void;
+  rest: GitLabRest;
+  gitops: GitOps;
+  existing: Config | null;
+  triggerLabel: string;
+}
+
+interface ConfiguredProject {
+  proposal: ProjectProposal;
+  labels: string[];
+  /** Nom du clone de référence créé pendant init (renommé si le nom court final diffère). */
+  cloneName: string;
+}
+
+function provisionalProject(info: ProjectInfo, name: string): ProjectConfig {
+  return {
+    name,
+    id: info.id,
+    path: info.pathWithNamespace,
+    httpUrl: info.httpUrl,
+    defaultBranch: info.defaultBranch,
+    testMode: "local",
+    ciSource: "merge_request",
+    worktreeInclude: [],
+    cowDirs: [],
+    status: { inProgress: { kind: "label", name: "x" }, inReview: { kind: "label", name: "x" }, blocked: { kind: "label", name: "x" } },
+    typeLabels: { bug: [], feature: [] },
+  };
+}
+
+const verifyInputOf = (c: ProjectConfig): VerifyInput => ({
+  setupCommand: c.setupCommand,
+  buildCommand: c.buildCommand,
+  testCommand: c.testCommand,
+  worktreeInclude: c.worktreeInclude,
+  cowDirs: c.cowDirs,
+  ...(c.localCheckout ? { localCheckout: resolveHome(c.localCheckout) } : {}),
+});
+
+function timeoutMs(env: InitEnv): number {
+  return (env.existing?.limits.commandTimeoutMin ?? 20) * 60_000;
+}
+
+async function agentProposal(env: InitEnv, ctx: ProposalContext, cloneName: string): Promise<ProjectProposal> {
+  const { info, prior } = ctx;
+  const { say, gitops, deps } = env;
+  const project0 = provisionalProject(info, cloneName);
+  say("  Clone de référence du dépôt…");
+  await gitops.ensureReferenceClone(project0);
+  const workdir = paths.worktree(`init-${info.id}`);
+  await gitops.createDetachedWorktree(project0, workdir);
+  const probeDeps = deps.probeDeps ?? defaultProbeDeps();
+  const state: InitToolsState = { reports: [], refusedCalls: 0 };
+  const toolsDeps: InitToolsDeps = {
+    info,
+    prior,
+    takenNames: [...ctx.usedNames].filter((n) => n !== prior?.name),
+    suggestedName: cloneName,
+    triggerLabel: env.triggerLabel,
+    listLabels: async () => ctx.labels.map((name) => ({ name, color: "" })),
+    listStatuses: async () => ctx.natives,
+    ciConfig: () => getCiConfig(env.rest, info.id, info.defaultBranch),
+    findCheckouts: () => findLocalCheckouts(info.httpUrl, { ...(deps.checkoutRoots ? { roots: deps.checkoutRoots } : {}), exclude: [paths.home()] }),
+    isCheckout: (dir) => isCheckoutOf(dir, info.httpUrl),
+    listIgnored: (dir) => listIgnoredFiles(dir),
+    probe: (tools) => probeToolchains(tools, workdir, probeDeps),
+    versionManagers: () => listVersionManagers(workdir, probeDeps),
+    verify: (input, attempt) =>
+      verifyCommands(input, attempt, { gitops, project: project0, worktreePath: paths.worktree(`init-${info.id}-verif`), timeoutMs: timeoutMs(env), say }),
+    say,
+  };
+  const transcriptPath =
+    (env.existing?.transcripts.enabled ?? true) ? join(paths.runsDir(), "init", `${info.id}-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`) : undefined;
+  try {
+    say("  Agent de configuration : lecture du dépôt, versions de toolchain, vérification réelle (plusieurs minutes)…");
+    const res = await runConfigAgent({
+      cwd: workdir,
+      projectPath: info.pathWithNamespace,
+      server: createInitServer(toolsDeps, state),
+      models: configAgentModels(env.existing),
+      ...(deps.queryFn ? { queryFn: deps.queryFn } : {}),
+      ...(deps.claudeExecutable ? { claudeExecutable: deps.claudeExecutable } : {}),
+      ...(transcriptPath ? { transcriptPath } : {}),
+      say,
+    });
+    say(`  (agent : ${res.turns} tours, ${Math.round(res.durationMs / 1000)} s, coût estimé ~$${res.costUsd.toFixed(2)}${transcriptPath ? `, transcript ${transcriptPath}` : ""})`);
+    return proposalFromAgent(res.proposal, ctx, state.reports);
+  } finally {
+    await gitops.removeWorktree(project0, workdir).catch(() => undefined);
+  }
+}
+
+/** Repli : détection simple, puis (en interactif) les questions champ par champ. */
+async function fallbackProposal(env: InitEnv, ctx: ProposalContext, reason?: string): Promise<ProjectProposal> {
+  let analysis: ProjectAnalysis | null = null;
+  try {
+    analysis = await analyseProject(env.rest, ctx.info.id, ctx.info.defaultBranch);
+  } catch (err) {
+    env.say(`  ⚠ Détection simple impossible : ${errorMessage(err)}`);
+  }
+  const p = proposalFromDetection(ctx, analysis, reason);
+  if (analysis) {
+    env.say(`  CI : ${analysis.hasCi ? `présente, pipeline ${analysis.ciSource === "merge_request" ? "de MR" : "de branche"}` : "absente"}`);
+  }
+  if (!env.opts.yes) {
+    const fc: FieldContext = { ask: env.ask, labels: ctx.labels, natives: ctx.natives, usedNames: ctx.usedNames, priorName: ctx.prior?.name };
+    for (const [field] of EDITABLE_FIELDS) {
+      // Le `.worktreeinclude` versionné prime : la liste de la config n'est qu'un repli, on ne la redemande pas.
+      if (field === "worktreeInclude" && analysis?.hasWorktreeInclude) continue;
+      await editField(field, p.config, fc);
+    }
+  }
+  return p;
+}
+
+type Outcome = ConfiguredProject | "skip" | "abort";
+
+async function configureProject(env: InitEnv, info: ProjectInfo, prior: ProjectConfig | undefined, usedNames: Set<string>): Promise<Outcome> {
+  const { say, ask, opts } = env;
+  say("");
+  say(`── ${info.pathWithNamespace} ──`);
+  const labels = (await listLabels(env.rest, info.id)).map((l) => l.name);
+  const natives = await listAllowedStatuses(env.rest, info.pathWithNamespace);
+  const others = new Set([...usedNames].filter((n) => n !== prior?.name));
+  const ctx: ProposalContext = { info, prior, labels, natives, usedNames: others };
+  const cloneName = suggestProjectName(defaultProjectName(info.pathWithNamespace), others, prior?.name);
+
+  const wantsAgent =
+    opts.agent !== false &&
+    (opts.yes || !prior || (await ask.confirm({ message: "Relancer l'agent de configuration sur ce projet ? (sinon la config actuelle est proposée)", default: false })));
+  let proposal: ProjectProposal;
+  if (wantsAgent) {
+    try {
+      proposal = await agentProposal(env, ctx, cloneName);
+    } catch (err) {
+      const reason = `Agent de configuration impossible (${errorMessage(err).split("\n")[0]}) : proposition par détection simple.`;
+      say(`  ⚠ ${reason}`);
+      proposal = await fallbackProposal(env, ctx, reason);
+    }
+  } else if (prior) {
+    proposal = proposalFromDetection(ctx, null);
+  } else {
+    proposal = await fallbackProposal(env, ctx);
+  }
+
+  if (opts.yes) {
+    for (const l of formatProposal(proposal, labelsToCreate(proposal.config, labels, env.triggerLabel))) say(l);
+    const v = currentVerification(proposal);
+    if (!v || v.verdict === "broken" || v.verdict === "refused") {
+      say(`  ⚠ Commandes ${v ? "cassées" : "non vérifiées"} : acceptées (--yes), mais le premier ticket risque d'être bloqué. Corrige la config ou relance init.`);
+    }
+    return { proposal, labels, cloneName };
+  }
+
+  const fc: FieldContext = { ask, labels, natives, usedNames: others, priorName: prior?.name };
+  for (;;) {
+    say("");
+    for (const l of formatProposal(proposal, labelsToCreate(proposal.config, labels, env.triggerLabel))) say(l);
+    const action = await ask.select({
+      message: `Config de ${info.pathWithNamespace}`,
+      choices: [
+        { name: "Valider", value: "accept" as const },
+        { name: "Modifier un champ", value: "edit" as const },
+        { name: "Revérifier les commandes (exécution réelle)", value: "verify" as const },
+        { name: "Ignorer ce projet", value: "skip" as const },
+        { name: "Tout annuler (rien n'est écrit)", value: "abort" as const },
+      ],
+      default: "accept",
+    });
+    if (action === "accept") return { proposal, labels, cloneName };
+    if (action === "skip" || action === "abort") return action;
+    if (action === "verify") {
+      const project0 = provisionalProject(info, cloneName);
+      try {
+        await env.gitops.ensureReferenceClone(project0);
+        say(`  Vérification des commandes (worktree jetable de ${info.defaultBranch})…`);
+        proposal.reports.push(
+          await verifyCommands(verifyInputOf(proposal.config), proposal.reports.length + 1, {
+            gitops: env.gitops,
+            project: project0,
+            worktreePath: paths.worktree(`init-${info.id}-verif`),
+            timeoutMs: timeoutMs(env),
+            say,
+          }),
+        );
+      } catch (err) {
+        say(`  ⚠ Vérification impossible : ${errorMessage(err)}`);
+      }
+      continue;
+    }
+    const field = await ask.select({
+      message: "Champ à modifier",
+      choices: EDITABLE_FIELDS.map(([value, name]) => ({ name, value })),
+      pageSize: EDITABLE_FIELDS.length,
+    });
+    await editField(field, proposal.config, fc);
+    if (field === "testCommand" && !proposal.config.testCommand && proposal.config.testMode === "local") {
+      say("  ⚠ Sans commande de test, le mode local ne peut rien vérifier : pense à passer le mode de test en ci-only.");
+    }
+    if (COMMAND_FIELDS.has(field) && proposal.reports.length > 0) say("  Les commandes ont changé : « Revérifier les commandes » relance l'exécution réelle.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Commande
+// ---------------------------------------------------------------------------
+
+export async function runInit(opts: InitOptions = {}, deps: InitDeps = {}): Promise<void> {
+  const say = deps.say ?? out;
+  const ask = opts.yes ? noQuestions : (deps.prompter ?? inquirerPrompter);
+  const file = opts.configPath ?? paths.config();
+  const outputFile = opts.output ? resolve(resolveHome(opts.output)) : undefined;
+  if (opts.dryRun && outputFile && outputFile === resolve(file)) {
+    throw new Error("--dry-run n'écrit jamais la config de SprintSaver : choisis un autre fichier pour --output.");
+  }
+  if (opts.dryRun) say("Mode --dry-run : rien n'est écrit sur GitLab ni dans la config de SprintSaver (clone de référence et worktrees jetables restent locaux).");
+
+  const existing = await readExisting(file, say);
+  if (existing) say(`Config existante trouvée (${file}) : ses valeurs sont proposées par défaut.`);
+
+  const projectArgs = opts.projects ?? [];
+  const urlDefault = projectArgs.find((p) => /^https?:\/\//i.test(p)) ?? existing?.gitlab.url ?? "https://gitlab.com";
   const typedUrl = (
-    await input({
-      message: "Adresse de l'instance GitLab (ex. https://gitlab.com ; une URL de projet est aussi acceptée)",
-      default: existing?.gitlab.url ?? "https://gitlab.com",
-      validate: (v) => (/^https?:\/\/\S+$/.test(v.trim()) ? true : "URL http(s) attendue."),
-    })
+    opts.url ??
+    (opts.yes
+      ? urlDefault
+      : await ask.input({
+          message: "Adresse de l'instance GitLab (ex. https://gitlab.com ; une URL de projet est aussi acceptée)",
+          default: urlDefault,
+          validate: (v) => (/^https?:\/\/\S+$/.test(v.trim()) ? true : "URL http(s) attendue."),
+        }))
   ).trim();
   // Une URL de projet (…/groupe/projet) ferait viser une API inexistante : on retrouve l'adresse de l'instance.
-  const { base: url, projectPath } = await resolveApiBase(typedUrl);
-  if (url !== typedUrl.replace(/\/+$/, "")) {
-    out(`Adresse de l'instance : ${url}${projectPath ? ` (projet ${projectPath} présélectionné)` : ""}.`);
-  }
+  const { base: url, projectPath } = await resolveApiBase(typedUrl, deps.fetch);
+  if (url !== typedUrl.replace(/\/+$/, "")) say(`Adresse de l'instance : ${url}${projectPath ? ` (projet ${projectPath} présélectionné)` : ""}.`);
 
   const host = hostOf(url);
-  const token = await ensureGlabConnection(host);
-  const rest = createGitLabRest(url, token);
-  const identity = await getUserDetails(rest);
-  let user: UserDetails;
-  if (identity.kind === "personal") {
-    user = identity.user;
-    out(`glab est connecté en tant que ${user.name} (@${user.username}).`);
-  } else {
-    out("glab est connecté avec un jeton de projet (GET /user indisponible) : les MR seront ouvertes par le bot du projet.");
-    out("Les MR te seront assignées : indique ton username GitLab (le tien, pas celui du bot).");
-    user = await resolveHumanUser(
-      rest,
-      (def) => input({ message: "Ton username GitLab", default: def, required: true }),
-      existing?.gitlab.username,
-    );
-    out(`MR assignées à ${user.name} (@${user.username}, id ${user.id}).`);
-  }
-
-  out(identity.kind === "personal" ? "Recherche des projets dont vous êtes membre…" : "Recherche du projet couvert par ce jeton…");
-  const projects = await listMemberProjects(rest);
-  if (projects.length === 0) throw new Error("Aucun projet accessible avec la connexion glab.");
-  const priorById = new Map((existing?.projects ?? []).map((p) => [p.id, p]));
-  const selectedIds = await checkbox({
-    message: "Projets à surveiller",
-    choices: projects.map((p) => ({ name: p.pathWithNamespace, value: p.id, checked: priorById.has(p.id) || p.pathWithNamespace.toLowerCase() === projectPath?.toLowerCase() })),
-    pageSize: 20,
-    required: true,
+  const token = await ensureGlabConnection(host, {
+    ...(deps.glabExec ? { exec: deps.glabExec } : {}),
+    ...(deps.glabLogin ? { login: deps.glabLogin } : {}),
+    confirmLogin: opts.yes ? async () => false : () => ask.confirm({ message: `Lancer \`glab auth login --hostname ${host}\` maintenant ?`, default: true }),
+    say,
   });
+  const rest = createGitLabRest(url, token, deps.fetch ? { fetch: deps.fetch } : undefined);
+  const user = await resolveIdentity(rest, opts, existing, ask, say);
+
+  // Projets
+  const wanted = [...projectArgs.map((p) => normalizeProjectArg(p, url)), ...(projectPath ? [projectPath] : [])].filter(Boolean);
+  const priorById = new Map((existing?.projects ?? []).map((p) => [p.id, p]));
+  let selected: ProjectInfo[];
+  if (opts.yes) {
+    if (wanted.length > 0) selected = await Promise.all([...new Set(wanted)].map((p) => getProject(rest, p)));
+    else if (existing?.projects.length) selected = await Promise.all(existing.projects.map((p) => getProject(rest, p.id)));
+    else throw new Error("--yes : indique au moins un projet avec --project <groupe/projet>.");
+  } else {
+    say("Recherche des projets accessibles…");
+    const projects = await listMemberProjects(rest);
+    for (const w of wanted) {
+      if (!projects.some((p) => p.pathWithNamespace.toLowerCase() === w.toLowerCase())) projects.unshift(await getProject(rest, w));
+    }
+    if (projects.length === 0) throw new Error("Aucun projet accessible avec la connexion glab.");
+    const ids = await ask.checkbox({
+      message: "Projets à surveiller",
+      choices: projects.map((p) => ({
+        name: p.pathWithNamespace,
+        value: p.id,
+        checked: priorById.has(p.id) || wanted.some((w) => w.toLowerCase() === p.pathWithNamespace.toLowerCase()),
+      })),
+      pageSize: 20,
+      required: true,
+    });
+    selected = ids.map((id) => projects.find((p) => p.id === id)!);
+  }
+  // En --yes, les projets suivis non cités restent tels quels.
+  const kept = opts.yes ? (existing?.projects ?? []).filter((p) => !selected.some((s) => s.id === p.id)) : [];
 
   const triggerLabel = existing?.triggerLabel ?? "auto::ready";
-  const usedNames = reservedProjectNames(selectedIds, priorById);
-  const projectConfigs: ProjectConfig[] = [];
-  for (const id of selectedIds) {
-    const info = projects.find((p) => p.id === id)!;
-    projectConfigs.push(await configureProject(rest, token, info, priorById.get(id), usedNames, triggerLabel));
+  const usedNames = reservedProjectNames(selected.map((s) => s.id), priorById);
+  for (const k of kept) usedNames.add(k.name);
+  const gitops = (deps.makeGitOps ?? ((t) => createGitOps({ token: t })))(token);
+  const env: InitEnv = { opts, deps, ask, say, rest, gitops, existing, triggerLabel };
+
+  const configured: ConfiguredProject[] = [];
+  for (const info of selected) {
+    const prior = priorById.get(info.id);
+    const res = await configureProject(env, info, prior, usedNames);
+    if (res === "abort") {
+      say("Init annulé : rien n'a été écrit, ni sur GitLab ni dans la config.");
+      return;
+    }
+    if (res === "skip") {
+      say(`  ${info.pathWithNamespace} ignoré.`);
+      continue;
+    }
+    if (prior && prior.name !== res.proposal.config.name) usedNames.delete(prior.name);
+    usedNames.add(res.proposal.config.name);
+    configured.push(res);
+  }
+  if (configured.length === 0 && kept.length === 0) {
+    say("Aucun projet retenu : rien n'a été écrit.");
+    return;
   }
 
-  out();
-  out("── Identité git des commits ──");
-  const authorName = await input({
-    message: "Nom de l'auteur des commits",
-    default: existing?.git.authorName ?? user.name ?? (await gitGlobal("user.name")),
-    required: true,
-  });
-  const authorEmail = await input({
-    message: "Email de l'auteur des commits",
-    default: existing?.git.authorEmail ?? user.email ?? (await gitGlobal("user.email")),
-    required: true,
-    validate: (v) => (/^\S+@\S+$/.test(v.trim()) ? true : "Email invalide."),
-  });
+  // Identité git des commits
+  const gitGlobal = deps.gitGlobal ?? gitGlobalDefault;
+  let authorName: string | undefined;
+  let authorEmail: string | undefined;
+  if (opts.yes) {
+    authorName = existing?.git.authorName ?? user.name ?? (await gitGlobal("user.name"));
+    authorEmail = existing?.git.authorEmail ?? user.email ?? (await gitGlobal("user.email"));
+    if (!authorEmail) say("⚠ Aucun email d'auteur de commit trouvé (config, GitLab, git) : celui de la config git globale sera utilisé.");
+  } else {
+    say("");
+    say("── Identité git des commits ──");
+    authorName = (
+      await ask.input({ message: "Nom de l'auteur des commits", default: existing?.git.authorName ?? user.name ?? (await gitGlobal("user.name")), required: true })
+    ).trim();
+    authorEmail = (
+      await ask.input({
+        message: "Email de l'auteur des commits",
+        default: existing?.git.authorEmail ?? user.email ?? (await gitGlobal("user.email")),
+        required: true,
+        validate: (v) => (/^\S+@\S+$/.test(v.trim()) ? true : "Email invalide."),
+      })
+    ).trim();
+  }
 
   // Aucun jeton dans la config : la connexion reste celle de glab (ADR, amendement 2).
   const config: Config = ConfigSchema.parse({
     ...(existing ?? {}),
     gitlab: { url, username: user.username, userId: user.id },
-    git: { authorName: authorName.trim(), authorEmail: authorEmail.trim() },
+    git: { ...(authorName ? { authorName } : {}), ...(authorEmail ? { authorEmail } : {}) },
     triggerLabel,
-    projects: projectConfigs,
+    projects: [...kept, ...configured.map((c) => c.proposal.config)],
   });
-  await saveConfig(config, file);
 
-  out();
-  out("── Résumé ──");
-  out(`GitLab : ${url} via glab — MR assignées à @${user.username}`);
-  out(`Label déclencheur : ${triggerLabel}`);
-  out(`Commits : ${authorName} <${authorEmail}>`);
-  for (const p of config.projects) {
-    const fmt = (t: StatusTarget) => (t.kind === "native" ? `natif « ${t.name} »` : `label « ${t.name} »`);
-    const st = `en cours ${fmt(p.status.inProgress)}, en review ${fmt(p.status.inReview)}, bloqué ${fmt(p.status.blocked)}`;
-    out(`• ${p.name} — ${p.path} [${p.defaultBranch}]`);
-    out(`    stack ${p.stack ?? "?"}, tests ${p.testMode}${p.testCommand ? ` : ${p.testCommand}` : ""}, CI ${p.ciSource}`);
-    out(`    statuts ${st}`);
+  // Écritures, après validation seulement.
+  say("");
+  for (const c of configured) {
+    const toCreate = labelsToCreate(c.proposal.config, c.labels, triggerLabel);
+    if (toCreate.length === 0) continue;
+    if (opts.dryRun) {
+      say(`Labels qui seraient créés sur ${c.proposal.info.pathWithNamespace} : ${toCreate.map((l) => l.name).join(", ")}.`);
+      continue;
+    }
+    say(`Labels de ${c.proposal.info.pathWithNamespace} :`);
+    for (const spec of toCreate) await ensureLabel(rest, c.proposal.info.id, spec, say);
   }
-  out();
-  out(`Config écrite dans ${file} (aucun jeton : la connexion reste gérée par glab).`);
+  if (!opts.dryRun) {
+    for (const c of configured) await renameReferenceClone(c.cloneName, c.proposal.config.name, say);
+  }
+
+  const yaml = YAML.stringify(config);
+  if (opts.dryRun && !outputFile) {
+    say("── Config produite (non écrite) ──");
+    say(yaml.trimEnd());
+  } else {
+    await saveConfig(config, outputFile ?? file);
+  }
+
+  say("");
+  say("── Résumé ──");
+  say(`GitLab : ${url} via glab — MR assignées à @${user.username}`);
+  say(`Label déclencheur : ${triggerLabel}`);
+  say(`Commits : ${authorName ?? "?"} <${authorEmail ?? "?"}>`);
+  for (const p of config.projects) {
+    const c = configured.find((x) => x.proposal.config.id === p.id);
+    const v = c ? currentVerification(c.proposal) : undefined;
+    say(`• ${p.name} — ${p.path} [${p.defaultBranch}]${c ? "" : " (inchangé)"}`);
+    say(`    stack ${p.stack ?? "?"}, tests ${p.testMode}${p.testCommand ? ` : ${p.testCommand}` : ""}, CI ${p.ciSource}`);
+    if (c) say(`    commandes ${v ? (v.verdict === "passed" ? "vérifiées" : v.verdict === "baseline_red" ? "vérifiées (tests déjà rouges sur la branche par défaut)" : "cassées") : "non vérifiées"}`);
+    if (c?.proposal.prerequisites.length) say(`    prérequis : ${c.proposal.prerequisites.join(" ; ")}`);
+  }
+  say("");
+  if (opts.dryRun) say(outputFile ? `Config écrite dans ${outputFile} (--dry-run : config de SprintSaver inchangée).` : "Config non écrite (--dry-run).");
+  else say(`Config écrite dans ${outputFile ?? file} (aucun jeton : la connexion reste gérée par glab).`);
+}
+
+async function resolveIdentity(rest: GitLabRest, opts: InitOptions, existing: Config | null, ask: Prompter, say: (s: string) => void): Promise<UserDetails> {
+  const identity = await getUserDetails(rest);
+  if (identity.kind === "personal") {
+    say(`glab est connecté en tant que ${identity.user.name} (@${identity.user.username}).`);
+    return identity.user;
+  }
+  say("glab est connecté avec un jeton de projet (GET /user indisponible) : les MR seront ouvertes par le bot du projet.");
+  let user: UserDetails;
+  if (opts.yes) {
+    const username = (opts.username ?? existing?.gitlab.username)?.trim().replace(/^@/, "");
+    if (!username) throw new Error("Jeton de projet : indique ton username GitLab avec --username (mode --yes).");
+    let found: UserDetails | null = null;
+    try {
+      found = await findUserByUsername(rest, username);
+    } catch (err) {
+      if (!(err instanceof UserLookupUnavailableError)) throw err;
+      if (existing?.gitlab.username === username) found = { id: existing.gitlab.userId, username, name: username };
+      else throw new Error(`${err.message} Lance init en interactif pour indiquer ton id.`);
+    }
+    if (!found) throw new Error(`Utilisateur GitLab « ${username} » introuvable.`);
+    user = found;
+  } else {
+    say("Les MR te seront assignées : indique ton username GitLab (le tien, pas celui du bot).");
+    user = await resolveHumanUser(rest, (def) => ask.input({ message: "Ton username GitLab", default: def, required: true }), opts.username ?? existing?.gitlab.username, say);
+  }
+  say(`MR assignées à ${user.name} (@${user.username}, id ${user.id}).`);
+  return user;
+}
+
+/** Le clone de référence a été créé sous un nom provisoire : il suit le nom court retenu. */
+async function renameReferenceClone(from: string, to: string, say: (s: string) => void): Promise<void> {
+  if (from === to) return;
+  const src = paths.repo(from);
+  const dst = paths.repo(to);
+  if (!existsSync(src) || existsSync(dst)) return;
+  try {
+    await rename(src, dst);
+  } catch (err) {
+    say(`  ⚠ Clone de référence ${src} non renommé (${errorMessage(err)}) : il sera recloné au premier ticket.`);
+  }
 }

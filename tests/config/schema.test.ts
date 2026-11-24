@@ -69,3 +69,32 @@ describe("captures avant/après (ADR, amendement 3)", () => {
     expect(modelFor(config, "ui-captures")).toBe(SONNET);
   });
 });
+
+describe("Claude in Chrome (ADR, amendement 4)", () => {
+  it("activé par défaut pour ui-captures et review, réglable", async () => {
+    const { chromeFor } = await import("../../src/config/schema.js");
+    const config = ConfigSchema.parse({ gitlab: { username: "o", userId: 5 } });
+    expect(config.chrome).toEqual({ enabled: true, phases: ["ui-captures", "review"] });
+    expect(chromeFor(config, "review")).toBe(true);
+    expect(chromeFor(config, "ui-captures")).toBe(true);
+    expect(chromeFor(config, "implement")).toBe(false);
+    const off = ConfigSchema.parse({ gitlab: { username: "o", userId: 5 }, chrome: { enabled: false } });
+    expect(chromeFor(off, "review")).toBe(false);
+    const only = ConfigSchema.parse({ gitlab: { username: "o", userId: 5 }, chrome: { phases: ["ui-captures"] } });
+    expect(only.chrome.enabled).toBe(true);
+    expect(chromeFor(only, "review")).toBe(false);
+    expect(ConfigSchema.safeParse({ gitlab: { username: "o", userId: 5 }, chrome: { phases: ["inconnue"] } }).success).toBe(false);
+  });
+});
+
+describe("toolchain relevée par init (ADR, amendement 5)", () => {
+  it("optionnelle ; source vide par défaut ; pinnedBy optionnel", () => {
+    const base = { name: "p", id: 1, path: "g/p", httpUrl: "https://g/p.git", status: { mode: "labels", inProgress: "a", inReview: "b", blocked: "c" } };
+    expect(ProjectConfigSchema.parse(base).toolchain).toBeUndefined();
+    const p = ProjectConfigSchema.parse({ ...base, toolchain: [{ tool: "node", required: "20.x" }, { tool: "java", required: "17", source: "pom.xml", pinnedBy: "JAVA_HOME" }] });
+    expect(p.toolchain).toEqual([
+      { tool: "node", required: "20.x", source: "" },
+      { tool: "java", required: "17", source: "pom.xml", pinnedBy: "JAVA_HOME" },
+    ]);
+  });
+});

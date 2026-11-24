@@ -146,7 +146,7 @@ Mode `bypassPermissions`, avec le répertoire de travail fixé sur le worktree. 
 
 - `~/.sprintsaver/config.yaml` (hors dépôt, contient le token) : token, username de l'utilisateur, projets suivis, et pour chaque projet la branche par défaut, les commandes de setup, de build et de test, les fichiers à copier, les dossiers à cloner, le mode de test (`local` ou `ci-only`), le mapping des statuts et le mapping type ↔ labels. S'y ajoutent les plafonds, les modèles par phase et les options de rétro et de transcripts.
 - Commandes :
-  - `sprintsaver init` : scan de GitLab et choix des projets. Les commandes sont **proposées par une session Claude en lecture seule** (outils Read, Glob, Grep), puis validées une à une par l'utilisateur. Une détection simple prend le relais si l'analyse échoue. Viennent ensuite le mapping des statuts et la création des labels manquants, sur proposition. La config produite reste modifiable à la main ;
+  - `sprintsaver init` : scan de GitLab et choix des projets. ~~Les commandes sont **proposées par une session Claude en lecture seule** (outils Read, Glob, Grep), puis validées une à une par l'utilisateur. Une détection simple prend le relais si l'analyse échoue. Viennent ensuite le mapping des statuts et la création des labels manquants, sur proposition.~~ Remplacé par l'amendement 5 : un agent de configuration propose la config complète de chaque projet, commandes vérifiées par une exécution réelle, et l'utilisateur la valide avant toute écriture. La config produite reste modifiable à la main ;
   - `sprintsaver watch` : boucle continue ;
   - `sprintsaver run <projet>#<iid>` : traite un ticket précis tout de suite, même sans label ;
   - `sprintsaver status` : ticket en cours, phase, file d'attente.
@@ -278,6 +278,72 @@ Format de la description, en plus du § 7 :
   - une session et une préparation de worktree de plus pour chaque ticket d'interface, et un temps de démarrage de l'application à payer deux fois ;
   - les exemples avant/après des contrats sont rédigés par le modèle à partir du code : ils illustrent le changement, ils ne sont pas extraits d'une exécution réelle ;
   - la capture dépend de la possibilité de lancer l'application en local et d'un navigateur headless sur le poste (Playwright du dépôt ou Chrome).
+
+## Amendement 4 — Claude in Chrome pour la review et les captures (2026-11-24)
+
+- **Statut** : accepté. Complète l'amendement 3 et le § 11.
+
+### Contexte
+
+La review ne voit le résultat qu'à travers le code et les tests : un rendu cassé, une erreur JavaScript ou un parcours sans issue lui échappent. Les captures de l'amendement 3 passent par un navigateur headless lancé en ligne de commande, qui se prête mal à un parcours (clic, saisie, connexion de démo) et à un cadrage sur la zone qui change. Le poste a Chrome et l'extension Claude in Chrome, que Claude Code sait piloter (`--chrome`).
+
+### Décision
+
+- **Phases** : `config.chrome.phases`, par défaut `review` et `ui-captures`. Leurs sessions sont lancées avec `--chrome` et reçoivent le skill d'outil `skills/tools/chrome/SKILL.md`. Toutes les autres sont lancées avec `--no-chrome`, pour qu'un réglage personnel de Claude Code ne l'active pas en douce. `chrome.enabled` (défaut `true`) coupe tout.
+- **Review** : quand le diff change un écran, la session lance l'application et la parcourt selon les critères du ticket. Un défaut vu à l'écran n'est bloquant qu'avec ses étapes de reproduction ; un goût visuel reste un nit. La règle du § 5 ne change pas : une case n'est cochée que si un test la prouve.
+- **Captures** : Claude in Chrome passe en tête des outils de capture. L'image est enregistrée par `save_to_disk` (JPEG pour une capture, PNG pour un zoom sur une région), puis copiée dans `.sprintsaver/captures/`. L'orchestrateur accepte déjà ces deux formats.
+- **Garde-fou** (§ 11) : le navigateur est celui de l'utilisateur, avec ses sessions ouvertes. Le hook refuse toute navigation hors de l'hôte local (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`), y compris dans un `browser_batch`, ainsi que `file_upload`, `upload_image` et `gif_creator`.
+- **Repli** : sans extension connectée ou si Chrome ne répond pas, la session ne s'y attarde pas et revient aux outils de l'amendement 3. `doctor` signale une extension absente par un avertissement.
+
+### Conséquences
+
+- **Positives** : la review voit l'effet du code ; les captures suivent un vrai parcours et se cadrent sur ce qui change.
+- **Négatives** :
+  - les sessions ouvrent des onglets dans le Chrome de l'utilisateur pendant `watch` (un groupe d'onglets à part, fermé en fin de session) ;
+  - la review d'un ticket d'interface coûte un lancement d'application de plus ;
+  - la restriction de navigation porte sur les appels d'outils : un lien cliqué ou du JavaScript exécuté dans la page peut encore changer d'origine. Comme le reste du garde-fou, elle vise les dérives du modèle, pas un adversaire.
+
+## Amendement 5 — Agent de configuration et commandes vérifiées (2026-11-24)
+
+- **Statut** : accepté. Remplace la session Claude en lecture seule de `init` (§ 12).
+
+### Contexte
+
+La session en lecture seule de `init` proposait setup, build et test d'après la doc du dépôt (README, Makefile), sans que personne ne les exécute avant le premier ticket. Une classe d'échecs passait inaperçue : la commande dépend du runtime par défaut de la machine (celui du PATH), alors que le projet exige une autre version, déclarée dans la CI, un Dockerfile, un fichier de version, une contrainte du manifeste ou seulement en prose. Le setup échouait au premier ticket, qui finissait bloqué sur GitLab. La config doit marcher sur la machine de l'utilisateur et le rester quand cet environnement évolue (mise à jour du runtime système).
+
+### Décision
+
+- **Agent de configuration** : pendant `init`, une session Agent SDK par projet produit une proposition complète (nom court, checkout local, stack, setup, build, test, mode de test, pipeline surveillé, fichiers à copier, dossiers de dépendances, mapping des statuts, labels de type), avec une explication, les versions de toolchain relevées et les prérequis manquants. Le reste reste déterministe : instance, connexion glab, identité, choix des projets, auteur des commits.
+- **Données par outils MCP in-process**, limités au projet : infos du projet et config actuelle, labels, statuts natifs, config CI (fusionnée par `GET /projects/:id/ci/lint` quand le rôle le permet, sinon le fichier brut), recherche bornée d'un checkout local (dossiers usuels du dossier personnel, profondeur 4, 20 000 dossiers et 8 s au plus, remotes lus dans la config git), noms des fichiers ignorés de ce checkout. Aucun outil n'écrit sur GitLab.
+- **Sous-agent `detect-commands`**, déclaré par l'option `agents` du SDK et appelé par l'agent principal, au premier plan (`background: false`) : l'agent principal attend son rapport avant de rendre sa sortie.
+  - il relève les versions exigées dans toutes les sources (CI, Dockerfile, fichiers de version, manifestes, prose) ;
+  - il les compare à la machine par des sondes de version en lecture seule : une liste fermée d'outils et de commandes fixes (`--version`, versions connues des gestionnaires de versions), lancées par l'orchestrateur, sans Bash ;
+  - il propose des commandes qui **fixent explicitement la version** au lieu de dépendre du défaut du PATH, de préférence par un gestionnaire de versions déjà installé, sinon par une installation versionnée explicite. Si c'est impossible, il le déclare comme **prérequis**.
+- **Rôle des commandes** : la commande de test est la seule que le moteur exécute pour valider une modification (§ 7). Elle porte donc toutes les vérifications bloquantes de la CI qui tournent en local (typecheck, lint, tests…). La commande de build n'est qu'une indication donnée aux agents.
+- **Vérification réelle**, par l'orchestrateur : l'outil `verify_commands` crée un worktree jetable de la branche par défaut, le prépare comme pour un ticket (§ 6), lance setup → test → build → test relancé avec le timeout des commandes (le test juste après le setup, comme dans un ticket où le moteur ne lance jamais le build ; des tests rouges n'empêchent pas de vérifier le build ; la relance dans le même worktree vérifie que la boucle test/fix pourra relancer la commande, même après un build), et rend un extrait utile de la sortie (erreurs et résumé, sans le bruit). Trois tentatives au plus par projet. Le diagnostic distingue une commande cassée (exécutable introuvable, mauvaise version, module manquant) de tests rouges sur la branche par défaut (ligne de base), qui ne bloquent pas la config. Avant exécution, une commande est refusée si elle installe quelque chose globalement (sudo, gestionnaires de paquets du système, `npm -g`, pip du système, installation de versions par un gestionnaire…), écrit hors du worktree ou touche au remote (règles du garde-fou, § 11).
+- **Commandes idiomatiques** : le sous-agent préfère la commande du gestionnaire de versions (`nvm exec 22`, `uv run --python 3.11`, `mise exec node@22 --`…) à un bricolage de chemins (liste d'un dossier de versions, chemin complet d'une version précise).
+- **Fichiers ignorés à copier** : `worktreeInclude` désigne les fichiers ignorés par git nécessaires pour lancer les tests **et l'application** en local (config d'environnement locale, secrets de dev, certificats…). Les phases `review` et `ui-captures` lancent l'application (amendement 4) : un `.env` dont la CI se passe peut leur être indispensable. Ces fichiers n'existent pas dans le worktree que lisent les agents : l'outil `list_local_ignored_files` donne les **noms** des fichiers ignorés présents dans le checkout local (jamais leur contenu), sans les dossiers de dépendances, de build et de cache, avec une limite de 150 entrées. Il signale le pendant ignoré de chaque fichier d'exemple versionné (`*.example`, `*.sample`, `*.template`, `*.dist` : `.env` pour `.env.example`), proposé en priorité.
+- **Environnement des commandes** : une seule fonction (`projectCommandEnv`) construit l'environnement de toutes les commandes du projet : setup, build et test des tickets, vérification de `init`, sondes de version et sessions agent. Elle retire les traces du gestionnaire de paquets qui a lancé SprintSaver : variables `npm_*` (dont `npm_config_prefix`, qui empêche nvm.sh de se charger), `INIT_CWD`, `NODE` et `COLOR` d'un script npm, variables de yarn, et entrées ajoutées au PATH (`node_modules/.bin` de SprintSaver et de ses parents, `node-gyp-bin`). Lancé par `npm run dev` ou par le binaire global, SprintSaver produit donc la même config, et `init` vérifie dans l'environnement où tourneront les tickets.
+- **Permissions** : les agents n'ont que Read, Glob et Grep, limités par un hook au worktree de la branche par défaut (et aux dossiers temporaires), plus l'outil Agent pour l'agent principal ; ni Bash ni écriture. Ils ne lisent donc pas les fichiers ignorés du checkout local, qui peuvent contenir de vrais secrets. Ils n'exécutent rien eux-mêmes et n'écrivent jamais sur GitLab.
+- **Validation humaine** : le code affiche la proposition complète, avec le résultat de la dernière vérification réelle (celui de l'orchestrateur fait foi, pas le récit de l'agent) et les prérequis. L'utilisateur valide, modifie un champ, relance la vérification, ignore le projet ou annule tout. Les labels manquants et la config ne sont écrits qu'après validation, par le code déterministe.
+- **Repli** : si l'agent échoue (claude absent, session en erreur, sortie invalide après une relance), la détection simple et les questions champ par champ reprennent. `--no-agent` force ce repli.
+- **Mode non interactif** : `--yes` accepte les propositions sans question (valeurs existantes ou par défaut pour les parties déterministes ; les projets suivis non cités restent inchangés) ; `--dry-run` n'écrit rien sur GitLab ni dans la config de SprintSaver et affiche la config, ou l'écrit dans `--output`.
+- **Config** : `toolchain` (optionnel) garde, par projet, les versions exigées, leur source et la façon dont les commandes les fixent. Le moteur ne le lit pas. Les modèles se surchargent par `models.init` (agent principal, Sonnet par défaut) et `models.detect-commands` (Opus par défaut).
+
+### Conséquences
+
+- **Positives** :
+  - les commandes de la config ont tourné au moins une fois sur la machine avant le premier ticket ;
+  - une version de runtime exigée par le projet est fixée dans la commande, et une mise à jour du runtime système ne la change pas ;
+  - un prérequis manquant est signalé à `init`, pas découvert par un ticket bloqué ;
+  - `init` se teste et s'automatise (`--yes`, `--dry-run`).
+- **Négatives** :
+  - `init` prend plusieurs minutes par projet (session, setup et tests réels) et consomme du quota Claude ;
+  - la vérification exécute les commandes du dépôt sur le poste, comme le setup d'un ticket : même confiance faite au dépôt ;
+  - les sondes et la politique d'installation reposent sur des listes (outils, gestionnaires de versions, commandes d'installation) à compléter pour les toolchains moins courantes ;
+  - un gestionnaire de versions qui installe à la volée une version absente (`mise exec`, par exemple) n'est pas bloqué par la politique : le prompt demande de n'utiliser que des versions déjà installées ;
+  - les noms des fichiers ignorés du checkout local (pas leur contenu) sont envoyés au modèle ;
+  - le diagnostic « ligne de base rouge » est une heuristique sur la sortie des lanceurs de tests ; l'agent la confirme ou la corrige, et l'utilisateur voit l'extrait.
 
 ## Hors périmètre v1 (reporté)
 

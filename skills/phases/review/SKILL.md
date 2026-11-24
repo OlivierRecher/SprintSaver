@@ -23,6 +23,19 @@ Ne modifie aucun fichier. Tu peux lire tout le dépôt, lancer les tests et des 
 5. Examine les tests modifiés par le diff. Une assertion retirée, un test skippé ou une attente assouplie sans raison liée au ticket est une régression masquée.
 6. Quand un doute peut se lever par l'exécution, lance le test ou la commande au lieu de spéculer.
 
+## Voir le résultat dans le navigateur
+
+Si la session a les outils `mcp__claude-in-chrome__*` et que le diff change ce qu'un écran de l'application affiche ou fait, regarde le résultat avant de conclure. La lecture du code reste la base de la review : le navigateur sert à voir ce qu'elle ne montre pas (rendu cassé, état vide ou d'erreur mal affiché, erreur JavaScript, parcours qui ne mène nulle part).
+
+1. Lance l'application du répertoire courant selon le skill du projet (section « Captures d'écran »), le `CLAUDE.md` du dépôt ou les scripts `dev`/`start` : en arrière-plan, sur un port libre, sortie redirigée vers `/tmp`. Attends que l'URL réponde (une minute au plus).
+2. Parcours chaque critère d'interface du ticket comme le ferait un utilisateur, avec les données de démo du dépôt. Essaie aussi les cas que le code laisse soupçonner : liste vide, valeur longue, erreur du serveur si un mock le permet.
+3. Regarde la console et les requêtes en échec sur chaque écran parcouru.
+4. Arrête le serveur et ferme tes onglets. Aucun fichier suivi par git ne doit rester modifié.
+
+Un défaut vu à l'écran devient un finding bloquant seulement avec ses étapes de reproduction (URL, actions, résultat obtenu contre résultat attendu), et `file`/`line` dès que tu as trouvé la cause dans le code. Un goût visuel (espacement, couleur) reste un nit. En mode delta, ne relance l'application que si le delta touche l'interface ; en mode rebase, seulement si un conflit résolu la touche.
+
+Si l'application ne démarre pas après deux tentatives, ou si le navigateur ne répond pas, n'insiste pas : relis sans, et dis-le en une ligne dans `summary`.
+
 ## Sévérité
 
 **blocking**, et seulement dans ces cas :
@@ -49,4 +62,4 @@ Si on te demande de relire un delta (après une correction de review, de CI ou u
 ## Remplir la sortie
 
 - `findings` : `category` parmi `bug`, `criterion`, `security`, `regression`, `style`, `perf`, `other`, cohérente avec la sévérité.
-- `summary` : 2 à 4 lignes. Impression d'ensemble, ce que tu as vérifié, et pourquoi les bloquants bloquent.
+- `summary` : 2 à 4 lignes. Impression d'ensemble, ce que tu as vérifié (dont les écrans parcourus dans le navigateur), et pourquoi les bloquants bloquent.

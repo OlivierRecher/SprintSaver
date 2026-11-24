@@ -7,6 +7,7 @@ import { z } from "zod";
 import { AgentRunError, type GitLabApi } from "../../src/contracts.js";
 import { ConfigSchema, OPUS, SONNET, type ProjectConfig } from "../../src/config/schema.js";
 import { killTrackedProcessGroups, trackedProcessGroups } from "../../src/process-groups.js";
+import { projectCommandEnv } from "../../src/process-env.js";
 import { createAgentRunner, parseJsonFromText, sessionEnv, spawnDetachedClaude, type QueryFn, type SpawnFn } from "../../src/agent/runner.js";
 
 const project = { name: "webapp", id: 42, path: "g/webapp" } as ProjectConfig;
@@ -226,14 +227,39 @@ describe("createAgentRunner", () => {
     expect(opts.resume).toBeUndefined();
   });
 
+  it("Claude in Chrome : --chrome et skill du navigateur pour review, --no-chrome ailleurs ou si désactivé", async () => {
+    await mkdir(join(skillsRoot, "phases", "review"), { recursive: true });
+    await writeFile(join(skillsRoot, "phases", "review", "SKILL.md"), "Skill review.");
+    await mkdir(join(skillsRoot, "tools", "chrome"), { recursive: true });
+    await writeFile(join(skillsRoot, "tools", "chrome", "SKILL.md"), "Skill navigateur.");
+    const q = fakeQuery([[success({ files: [], count: 0 })], [success({ files: [], count: 0 })], [success({ files: [], count: 0 })]]);
+    const runner = createAgentRunner({ config: config(), gitlab, queryFn: q.fn, skillsRoot, claudeExecutable: CLAUDE });
+    const review = await runner.run(request({ phase: "review" }));
+    expect(q.calls[0]?.options?.extraArgs).toEqual({ chrome: null });
+    expect(review.skillsLoaded).toEqual(["phases/review", "tools/chrome"]);
+    expect((q.calls[0]?.options?.systemPrompt as { append: string }).append).toContain("Skill navigateur.");
+    const impl = await runner.run(request());
+    expect(q.calls[1]?.options?.extraArgs).toEqual({ "no-chrome": null });
+    expect(impl.skillsLoaded).toEqual(["phases/implement"]);
+    const off = createAgentRunner({ config: config({ chrome: { enabled: false } }), gitlab, queryFn: q.fn, skillsRoot, claudeExecutable: CLAUDE });
+    expect((await off.run(request({ phase: "review" }))).skillsLoaded).toEqual(["phases/review"]);
+    expect(q.calls[2]?.options?.extraArgs).toEqual({ "no-chrome": null });
+  });
+
   it("n'exporte pas ANTHROPIC_API_KEY dans l'env de la session", async () => {
     const q = fakeQuery([[success({ files: [], count: 0 })]]);
     const runner = createAgentRunner({ config: config(), gitlab, queryFn: q.fn, skillsRoot, claudeExecutable: CLAUDE });
     await runner.run(request());
     const env = q.calls[0]?.options?.env ?? {};
     expect("ANTHROPIC_API_KEY" in env).toBe(false);
-    expect(env.PATH).toBe(process.env.PATH);
+    // PATH de l'utilisateur, sans les node_modules/.bin ajoutés si vitest tourne sous un script npm.
+    expect(env.PATH).toBe(projectCommandEnv().PATH);
     expect("ANTHROPIC_API_KEY" in sessionEnv({ ANTHROPIC_API_KEY: "x", HOME: "/h" })).toBe(false);
+    // Même environnement que les commandes du projet : sans les variables d'un script npm.
+    const fromNpm = sessionEnv({ HOME: "/h", npm_config_prefix: "/opt/homebrew", npm_lifecycle_event: "dev", INIT_CWD: "/x" });
+    expect(fromNpm.npm_config_prefix).toBeUndefined();
+    expect(fromNpm.INIT_CWD).toBeUndefined();
+    expect(fromNpm.HOME).toBe("/h");
   });
 
   it("utilise Sonnet et effort medium pour mr-writeup, et respecte la surcharge de modèle", async () => {

@@ -20,11 +20,12 @@ Tu ne modifies aucun fichier source, dans aucun des deux worktrees. Ce que tu mo
 
 Utilise le premier outil disponible :
 
-1. Playwright s'il est dans les dépendances du dépôt (`npx playwright screenshot --viewport-size=1280,800 --wait-for-timeout=1500 <url> <fichier>`, ou un petit script dans `/tmp` pour un parcours : clic, saisie, connexion de démo). Si ses navigateurs ne sont pas installés, ajoute `--channel=chrome` pour utiliser le Chrome du poste ;
-2. Chrome ou Chromium en mode headless : `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu --hide-scrollbars --window-size=1280,800 --screenshot=<fichier> <url>` ;
-3. Chromium, Edge ou Brave avec les mêmes options headless que Chrome.
+1. Claude in Chrome si la session a les outils `mcp__claude-in-chrome__*` (voir le skill d'outil du navigateur). C'est le plus fiable pour un parcours (clic, saisie, connexion de démo) et pour cadrer sur la zone qui change (`zoom` sur une région). Un seul onglet pour les deux versions : capture l'avant sur son port, puis l'après sur le sien, à la même taille de fenêtre. Copie chaque image enregistrée dans le dossier de captures en gardant son extension ;
+2. Playwright s'il est dans les dépendances du dépôt (`npx playwright screenshot --viewport-size=1280,800 --wait-for-timeout=1500 <url> <fichier>`, ou un petit script dans `/tmp` pour un parcours : clic, saisie, connexion de démo). Si ses navigateurs ne sont pas installés, ajoute `--channel=chrome` pour utiliser le Chrome du poste ;
+3. Chrome ou Chromium en mode headless : `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu --hide-scrollbars --window-size=1280,800 --screenshot=<fichier> <url>` ;
+4. Chromium, Edge ou Brave avec les mêmes options headless que Chrome.
 
-N'installe pas de navigateur (le téléchargement écrirait hors du worktree). Sans aucun de ces outils, abandonne avec `skippedReason` : « aucun navigateur headless disponible ».
+Si Claude in Chrome ne répond pas, passe directement au suivant. N'installe pas de navigateur (le téléchargement écrirait hors du worktree). Sans aucun de ces outils, abandonne avec `skippedReason` : « aucun navigateur disponible ».
 
 Règles :
 
@@ -32,7 +33,7 @@ Règles :
 - Cadre l'écran sur la zone qui change. Une page entière n'est utile que si le changement porte sur la mise en page.
 - Attends la fin des chargements et des animations : pas de spinner ni de squelette sur la capture.
 - Écran nouveau (il n'existe pas avant) : capture seulement l'après et laisse `before` vide.
-- Vérifie chaque fichier : un PNG non vide, qui montre bien l'écran demandé (lis l'image). Une page d'erreur ou de connexion n'est pas une capture valable.
+- Vérifie chaque fichier : une image PNG ou JPEG non vide, qui montre bien l'écran demandé (lis l'image). Une page d'erreur ou de connexion n'est pas une capture valable.
 
 ## Abandonner proprement
 
